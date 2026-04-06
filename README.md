@@ -1,4 +1,4 @@
-# IMC Prosperity — workspace
+# IMC Prosperity
 
 We are working on algorithms for **EMERALDS** and **TOMATOES** while getting used to the **tutorial round** on [IMC Prosperity](https://prosperity.imc.com/).
 
