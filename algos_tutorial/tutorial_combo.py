@@ -12,12 +12,12 @@ EMERALDS = "EMERALDS"
 
 TD_TOMATOES = "tomatoes"
 
-# --- Emeralds ---
+# Emeralds ~ static fair-value-based market making
 POSITION_LIMIT_EMERALDS = 80
 FAIR = 10_000
 SPREAD_HALF = 7
 
-# --- Tomatoes ---
+# Tomatoes ~ rolling linear forecast + regression-style quoting
 LAG = 4
 FIT_MIN_ROWS = 12
 FIT_TAIL = 80
@@ -131,6 +131,9 @@ class Trader:
             order_depth = state.order_depths[product]
             orders: List[Order] = []
 
+            # Emeralds
+            # Assumes a fixed fair of 10,000 and posts a single bid at 9,993 and ask at 10,007, 
+            # scaling each order so inventory stays within ±80; no extra state is stored in traderData.
             if product == EMERALDS:
                 if order_depth.buy_orders and order_depth.sell_orders:
                     bid_px = FAIR - SPREAD_HALF
@@ -143,6 +146,10 @@ class Trader:
                     if ask_vol < 0:
                         orders.append(Order(EMERALDS, ask_px, ask_vol))
 
+            # Tomatoes
+            # Appends each mid to traderData["tomatoes"], refits a short AR(4) forecast with
+            # rolling least squares, rounds it to a one-tick fair band (pred ± 1), then lifts cheap asks, hits rich
+            # bids, and rests improving quotes at the touch—optionally including shorts—capped at 20 lots.
             elif product == TOMATOES:
                 td_t: Dict[str, Any] = dict(trader_data_dict.get(TD_TOMATOES, {}))
                 if order_depth.buy_orders and order_depth.sell_orders:
