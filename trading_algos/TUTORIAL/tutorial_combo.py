@@ -20,10 +20,10 @@ SPREAD_HALF = 7
 # Tomatoes ~ rolling linear forecast + regression-style quoting
 LAG = 4
 FIT_MIN_ROWS = 12
-FIT_TAIL = 80
-BAND = 1
+FIT_TAIL = 30
+BAND = 2
 POSITION_LIMIT_TOMATOES = 20
-ORDER_SIZE_TOMATOES = 20
+ORDER_SIZE_TOMATOES = 10
 ALLOW_SHORT_SELL = True
 
 
