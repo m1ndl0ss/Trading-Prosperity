@@ -3,6 +3,9 @@ from typing import List
 import collections
 import numpy as np
 
+ASH_COATED_OSMIUM = "ASH_COATED_OSMIUM"
+INTARIAN_PEPPER_ROOT = "INTARIAN_PEPPER_ROOT"
+
 class Trader:
     def __init__(self):
         # Configuration
@@ -41,24 +44,25 @@ class Trader:
             max_limit = self.limits.get(product, 20)
             
             # --- STRATEGY 1: ASH_COATED_OSMIUM (Mean Reversion / Market Making) ---
-            if product == "ASH_COATED_OSMIUM":
-                # Sell if price > 10000
-                if len(order_depth.buy_orders) > 0:
-                    best_bid = max(order_depth.buy_orders.keys())
-                    if best_bid > self.osmium_fair_value:
-                        # Market sell into existing bids
-                        sell_quantity = max(-order_depth.buy_orders[best_bid], -max_limit - current_position)
-                        if sell_quantity != 0:
-                            orders.append(Order(product, best_bid, sell_quantity))
-                
-                # Buy if price < 10000
-                if len(order_depth.sell_orders) > 0:
-                    best_ask = min(order_depth.sell_orders.keys())
-                    if best_ask < self.osmium_fair_value:
-                        # Market buy into existing asks
-                        buy_quantity = min(-order_depth.sell_orders[best_ask], max_limit - current_position)
-                        if buy_quantity != 0:
-                            orders.append(Order(product, best_ask, buy_quantity))
+            if product == ASH_COATED_OSMIUM:
+                if order_depth.buy_orders and order_depth.sell_orders:
+                    best_bid = max(order_depth.buy_orders)
+                    best_ask = min(order_depth.sell_orders)
+
+                    # Skip ticks with a crossed or zero-width spread.
+                    if best_bid < best_ask:
+                        bid_px = best_bid + 1
+                        ask_px = best_ask - 1
+
+                        # Skip if the one-tick improvement would cross itself.
+                        if bid_px < ask_px:
+                            pos = state.position.get(ASH_COATED_OSMIUM, 0)
+                            bid_vol = 80 - pos
+                            ask_vol = -80 - pos
+                            if bid_vol > 0:
+                                orders.append(Order(ASH_COATED_OSMIUM, bid_px, bid_vol))
+                            if ask_vol < 0:
+                                orders.append(Order(ASH_COATED_OSMIUM, ask_px, ask_vol))
 
             # --- STRATEGY 2: INTARIAN_PEPPER_ROOT (Trend Following) ---
             elif product == "INTARIAN_PEPPER_ROOT":
