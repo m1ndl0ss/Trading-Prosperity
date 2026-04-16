@@ -22,6 +22,14 @@ def read_trades_csv(path: Path) -> pd.DataFrame:
 
 
 def row_to_depth(row: pd.Series) -> OrderDepth:
+    """
+    Build an OrderDepth from a prices CSV row.
+
+    On the real exchange, **ask-side quantities are negative**; algos use
+    expressions like ``min(-order_depth.sell_orders[best_ask], ...)`` to get a
+    positive lift size. CSV columns store unsigned volumes, so we negate ask
+    sizes here to match competition semantics (bid side stays positive).
+    """
     d = OrderDepth()
     for i in (1, 2, 3):
         bp = row.get(f"bid_price_{i}")
@@ -31,7 +39,7 @@ def row_to_depth(row: pd.Series) -> OrderDepth:
         ap = row.get(f"ask_price_{i}")
         av = row.get(f"ask_volume_{i}")
         if pd.notna(ap) and pd.notna(av) and int(av) > 0:
-            d.sell_orders[int(ap)] = int(av)
+            d.sell_orders[int(ap)] = -int(av)
     return d
 
 

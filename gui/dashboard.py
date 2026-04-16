@@ -68,23 +68,6 @@ def _build_day_map(round_name: str) -> dict[str, tuple[str, str]]:
     }
 
 
-def _rsi_wilder(close: pd.Series, period: int = 14) -> pd.Series:
-    """Wilder RSI on a price series (here: mid from the book). Returns 0–100 where defined."""
-    c = close.astype(float)
-    delta = c.diff()
-    gain = delta.clip(lower=0.0)
-    loss = (-delta).clip(lower=0.0)
-    alpha = 1.0 / float(period)
-    avg_gain = gain.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=alpha, min_periods=period, adjust=False).mean()
-    al = avg_loss.replace(0.0, np.nan)
-    rs = avg_gain / al
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    rsi = rsi.mask((avg_gain > 0) & (avg_loss == 0), 100.0)
-    rsi = rsi.mask((avg_gain == 0) & (avg_loss == 0), 50.0)
-    return rsi
-
-
 def _ema_mid(close: pd.Series, period: int) -> pd.Series:
     """Standard EMA on mid (span = period, adjust=False)."""
     c = close.astype(float)
@@ -146,357 +129,140 @@ def _apply_time_window(df: pd.DataFrame, t_min: int | None, t_max: int | None) -
     return out
 
 
-PANEL_PRICE = "price"
-PANEL_VOLUME = "volume"
-PANEL_RSI = "rsi"
-PANEL_STRATEGY = "strategy"
-
-_PANEL_LABELS: dict[str, str] = {
-    PANEL_PRICE: "Price & tape",
-    PANEL_VOLUME: "L1 volume",
-    PANEL_RSI: "RSI",
-    PANEL_STRATEGY: "Position & equity",
-}
-
-
-def _available_panels(has_strategy: bool) -> list[str]:
-    out = [PANEL_PRICE, PANEL_VOLUME, PANEL_RSI]
-    if has_strategy:
-        out.append(PANEL_STRATEGY)
-    return out
-
-
-def _default_panel_order(available: list[str]) -> list[str]:
-    return list(available)
-
-
-def _sync_stored_panel_order(product: str, available: list[str]) -> None:
-    """Keep session order in sync with what is possible for this product/strategy."""
-    key = f"chart_panel_order_{product}"
-    if key not in st.session_state:
-        st.session_state[key] = _default_panel_order(available)
-        return
-    cur = [p for p in st.session_state[key] if p in available]
-    for p in available:
-        if p not in cur:
-            cur.append(p)
-    if not cur:
-        cur = [PANEL_PRICE] if PANEL_PRICE in available else [available[0]]
-    st.session_state[key] = cur
-
-
-def _render_panel_controls(product: str, available: list[str]) -> list[str]:
-    """
-    Show/hide and reorder panels (↑/↓). Returns top-to-bottom panel ids for the figure.
-    """
-    key = f"chart_panel_order_{product}"
-    _sync_stored_panel_order(product, available)
-    order: list[str] = list(st.session_state[key])
-
-    st.markdown("**Visible panels (top → bottom)**")
-    for i, pid in enumerate(list(order)):
-        label = _PANEL_LABELS.get(pid, pid)
-        c0, c1, c2, c3, c4 = st.columns([0.35, 3.2, 0.55, 0.55, 0.55])
-        c0.markdown(f"{i + 1}.")
-        c1.markdown(label)
-        if c2.button("↑", key=f"pnl_up_{product}_{i}", disabled=i == 0):
-            order[i - 1], order[i] = order[i], order[i - 1]
-            st.session_state[key] = order
-            st.rerun()
-        if c3.button("↓", key=f"pnl_dn_{product}_{i}", disabled=i >= len(order) - 1):
-            order[i + 1], order[i] = order[i], order[i + 1]
-            st.session_state[key] = order
-            st.rerun()
-        if c4.button("Hide", key=f"pnl_hide_{product}_{i}"):
-            order.pop(i)
-            if not order:
-                order = [PANEL_PRICE] if PANEL_PRICE in available else [available[0]]
-            st.session_state[key] = order
-            st.rerun()
-
-    hidden = [p for p in available if p not in order]
-    if hidden:
-        add_cols = st.columns([3, 1])
-        choice = add_cols[0].selectbox(
-            "Add panel",
-            options=hidden,
-            format_func=lambda p: _PANEL_LABELS.get(p, p),
-            key=f"pnl_add_sel_{product}",
-        )
-        if add_cols[1].button("Add", key=f"pnl_add_btn_{product}"):
-            order.append(choice)
-            st.session_state[key] = order
-            st.rerun()
-
-    return list(st.session_state[key])
-
-
-def _build_figure(
-    df: pd.DataFrame,
-    trades_pts: pd.DataFrame,
-    has_strategy: bool,
-    product: str,
-    rsi_period: int = 14,
-    ema_period: int = 20,
-    panel_order: list[str] | None = None,
-) -> go.Figure:
-    available = _available_panels(has_strategy)
-    if panel_order is None:
-        panel_order = _default_panel_order(available)
-    order = [p for p in panel_order if p in available]
-    if not order:
-        order = [PANEL_PRICE] if PANEL_PRICE in available else [available[0]]
-
-    n_rows = len(order)
-    row_map = {pid: i + 1 for i, pid in enumerate(order)}
-    specs: list[list[dict]] = [[{"secondary_y": True}] if pid == PANEL_STRATEGY else [{}] for pid in order]
-    row_heights = [1.0 / n_rows] * n_rows
-
-    fig = make_subplots(
-        rows=n_rows,
-        cols=1,
-        shared_xaxes=True,
-        vertical_spacing=0.06,
-        row_heights=row_heights,
-        specs=specs,
-    )
-
-    x = df["timestamp"]
-    rp = row_map.get(PANEL_PRICE)
-    rv = row_map.get(PANEL_VOLUME)
-    rr = row_map.get(PANEL_RSI)
-    rs = row_map.get(PANEL_STRATEGY)
-
-    if rp is not None:
-        fig.add_trace(
-            go.Scatter(x=x, y=df["best_bid"], name="Best bid", line=dict(width=1)), row=rp, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=x, y=df["best_ask"], name="Best ask", line=dict(width=1)), row=rp, col=1
-        )
-        fig.add_trace(
-            go.Scatter(x=x, y=df["mid"], name="Mid", line=dict(dash="dot", width=1)), row=rp, col=1
-        )
-
-        ema_mid = _ema_mid(df["mid"], ema_period)
-        if ema_mid.notna().any():
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=ema_mid,
-                    name=f"EMA mid ({ema_period})",
-                    line=dict(width=2, color="#ff7f0e"),
-                ),
-                row=rp,
-                col=1,
-            )
-
-        if has_strategy and "fair" in df.columns:
-            fair = df["fair"]
-            if fair.notna().any():
-                fig.add_trace(
-                    go.Scatter(x=x, y=fair, name="Fair (model)", line=dict(width=2)), row=rp, col=1
-                )
-        if has_strategy and "ema" in df.columns:
-            ema = df["ema"]
-            if ema.notna().any():
-                fig.add_trace(
-                    go.Scatter(
-                        x=x,
-                        y=ema,
-                        name="EMA (state)",
-                        line=dict(width=2, dash="dot"),
-                    ),
-                    row=rp,
-                    col=1,
-                )
-        if has_strategy and "bid_px" in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=df["bid_px"],
-                    name="Strategy bid",
-                    line=dict(width=1, dash="dash"),
-                    connectgaps=False,
-                ),
-                row=rp,
-                col=1,
-            )
-        if has_strategy and "ask_px" in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=df["ask_px"],
-                    name="Strategy ask",
-                    line=dict(width=1, dash="dash"),
-                    connectgaps=False,
-                ),
-                row=rp,
-                col=1,
-            )
-
-        if not trades_pts.empty:
-            fig.add_trace(
-                go.Scatter(
-                    x=trades_pts["timestamp"],
-                    y=trades_pts["price"],
-                    mode="markers",
-                    name="Trades (tape)",
-                    marker=dict(size=5, opacity=0.45, color="#7f7f7f"),
-                ),
-                row=rp,
-                col=1,
-            )
-
-        if has_strategy and "sim_buy_px" in df.columns:
-            bmsk = (df["buy_fills_step"] > 0) & df["sim_buy_px"].notna()
-            if bmsk.any():
-                sub = df.loc[bmsk]
-                sizes = (6 + sub["sim_buy_vol"].astype(float).clip(upper=36)).tolist()
-                fig.add_trace(
-                    go.Scatter(
-                        x=sub["timestamp"],
-                        y=sub["sim_buy_px"],
-                        mode="markers",
-                        name="Our buy (sim)",
-                        marker=dict(
-                            symbol="triangle-up",
-                            size=sizes,
-                            color="#2ca02c",
-                            line=dict(width=1, color="white"),
-                        ),
-                        hovertemplate="buy %{y} × %{customdata}<extra></extra>",
-                        customdata=sub["sim_buy_vol"],
-                    ),
-                    row=rp,
-                    col=1,
-                )
-        if has_strategy and "sim_sell_px" in df.columns:
-            smsk = (df["sell_fills_step"] > 0) & df["sim_sell_px"].notna()
-            if smsk.any():
-                sub = df.loc[smsk]
-                sizes = (6 + sub["sim_sell_vol"].astype(float).clip(upper=36)).tolist()
-                fig.add_trace(
-                    go.Scatter(
-                        x=sub["timestamp"],
-                        y=sub["sim_sell_px"],
-                        mode="markers",
-                        name="Our sell (sim)",
-                        marker=dict(
-                            symbol="triangle-down",
-                            size=sizes,
-                            color="#d62728",
-                            line=dict(width=1, color="white"),
-                        ),
-                        hovertemplate="sell %{y} × %{customdata}<extra></extra>",
-                        customdata=sub["sim_sell_vol"],
-                    ),
-                    row=rp,
-                    col=1,
-                )
-
-    if rv is not None:
-        if df["bid_vol_1"].notna().any():
-            fig.add_trace(
-                go.Scatter(x=x, y=df["bid_vol_1"], name="Mkt bid vol L1", stackgroup=None),
-                row=rv,
-                col=1,
-            )
-        if df["ask_vol_1"].notna().any():
-            fig.add_trace(
-                go.Scatter(x=x, y=df["ask_vol_1"], name="Mkt ask vol L1", stackgroup=None),
-                row=rv,
-                col=1,
-            )
-
-        if has_strategy and "bid_size" in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=df["bid_size"],
-                    name="Quoted bid size",
-                    line=dict(dash="dot"),
-                    connectgaps=False,
-                ),
-                row=rv,
-                col=1,
-            )
-        if has_strategy and "ask_size" in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=df["ask_size"],
-                    name="Quoted ask size",
-                    line=dict(dash="dot"),
-                    connectgaps=False,
-                ),
-                row=rv,
-                col=1,
-            )
-
-    if rr is not None:
-        rsi = _rsi_wilder(df["mid"], period=rsi_period)
-        fig.add_trace(
-            go.Scatter(
-                x=x,
-                y=rsi,
-                name=f"RSI ({rsi_period})",
-                line=dict(width=1.5, color="#9467bd"),
-            ),
-            row=rr,
-            col=1,
-        )
-        fig.add_hline(
-            y=70,
-            line_dash="dash",
-            line_color="rgba(120,120,120,0.55)",
-            line_width=1,
-            row=rr,
-            col=1,
-        )
-        fig.add_hline(
-            y=30,
-            line_dash="dash",
-            line_color="rgba(120,120,120,0.55)",
-            line_width=1,
-            row=rr,
-            col=1,
-        )
-
-    if rs is not None and has_strategy:
-        if "pos" in df.columns:
-            fig.add_trace(
-                go.Scatter(x=x, y=df["pos"], name="Position", line=dict(width=2)),
-                row=rs,
-                col=1,
-                secondary_y=False,
-            )
-        if "equity" in df.columns:
-            fig.add_trace(
-                go.Scatter(
-                    x=x,
-                    y=df["equity"],
-                    name="Equity (MTM mid)",
-                    line=dict(width=2, dash="dash"),
-                ),
-                row=rs,
-                col=1,
-                secondary_y=True,
-            )
-
-    fig.update_layout(
-        height=160 + n_rows * 560,
+def _hover_layout_kwargs() -> dict:
+    return dict(
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-        margin=dict(l=48, r=24, t=60, b=48),
-        # Linked hover across stacked rows (Plotly defaults to "single" = only the panel under the cursor).
-        hoversubplots="axis",
+        margin=dict(l=48, r=48, t=72, b=48),
         hovermode="x unified",
         hoverlabel=dict(namelength=-1, align="left"),
-        # Easier to pick a time slice on dense lines (matches nearest x across traces).
         hoverdistance=-1,
         spikedistance=-1,
     )
+
+
+def _build_price_figure(
+    df: pd.DataFrame,
+    trades_pts: pd.DataFrame,
+    has_strategy: bool,
+    ema_period: int,
+    title: str,
+) -> go.Figure:
+    """Bid / ask / mid / fair / tape / sim fills (price axis only)."""
+    x = df["timestamp"]
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(x=x, y=df["best_bid"], name="Best bid", line=dict(width=1)))
+    fig.add_trace(go.Scatter(x=x, y=df["best_ask"], name="Best ask", line=dict(width=1)))
+    fig.add_trace(go.Scatter(x=x, y=df["mid"], name="Mid", line=dict(dash="dot", width=1)))
+
+    ema_mid = _ema_mid(df["mid"], ema_period)
+    if ema_mid.notna().any():
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=ema_mid,
+                name=f"EMA mid ({ema_period})",
+                line=dict(width=2, color="#ff7f0e"),
+            )
+        )
+
+    if has_strategy and "fair" in df.columns:
+        fair = df["fair"]
+        if fair.notna().any():
+            fig.add_trace(go.Scatter(x=x, y=fair, name="Fair (model)", line=dict(width=2)))
+    if has_strategy and "ema" in df.columns:
+        ema = df["ema"]
+        if ema.notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=ema,
+                    name="EMA (state)",
+                    line=dict(width=2, dash="dot"),
+                )
+            )
+    if has_strategy and "bid_px" in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=df["bid_px"],
+                name="Strategy bid",
+                line=dict(width=1, dash="dash"),
+                connectgaps=False,
+            )
+        )
+    if has_strategy and "ask_px" in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=df["ask_px"],
+                name="Strategy ask",
+                line=dict(width=1, dash="dash"),
+                connectgaps=False,
+            )
+        )
+
+    if not trades_pts.empty:
+        fig.add_trace(
+            go.Scatter(
+                x=trades_pts["timestamp"],
+                y=trades_pts["price"],
+                mode="markers",
+                name="Trades (tape)",
+                marker=dict(size=5, opacity=0.45, color="#7f7f7f"),
+            )
+        )
+
+    if has_strategy and "sim_buy_px" in df.columns:
+        bmsk = (df["buy_fills_step"] > 0) & df["sim_buy_px"].notna()
+        if bmsk.any():
+            sub = df.loc[bmsk]
+            sizes = (6 + sub["sim_buy_vol"].astype(float).clip(upper=36)).tolist()
+            fig.add_trace(
+                go.Scatter(
+                    x=sub["timestamp"],
+                    y=sub["sim_buy_px"],
+                    mode="markers",
+                    name="Our buy (sim)",
+                    marker=dict(
+                        symbol="triangle-up",
+                        size=sizes,
+                        color="#2ca02c",
+                        line=dict(width=1, color="white"),
+                    ),
+                    hovertemplate="buy %{y} × %{customdata}<extra></extra>",
+                    customdata=sub["sim_buy_vol"],
+                )
+            )
+    if has_strategy and "sim_sell_px" in df.columns:
+        smsk = (df["sell_fills_step"] > 0) & df["sim_sell_px"].notna()
+        if smsk.any():
+            sub = df.loc[smsk]
+            sizes = (6 + sub["sim_sell_vol"].astype(float).clip(upper=36)).tolist()
+            fig.add_trace(
+                go.Scatter(
+                    x=sub["timestamp"],
+                    y=sub["sim_sell_px"],
+                    mode="markers",
+                    name="Our sell (sim)",
+                    marker=dict(
+                        symbol="triangle-down",
+                        size=sizes,
+                        color="#d62728",
+                        line=dict(width=1, color="white"),
+                    ),
+                    hovertemplate="sell %{y} × %{customdata}<extra></extra>",
+                    customdata=sub["sim_sell_vol"],
+                )
+            )
+
+    fig.update_layout(
+        title=title,
+        height=520,
+        **_hover_layout_kwargs(),
+    )
     fig.update_xaxes(
+        title_text="Timestamp",
         showspikes=True,
         spikemode="across",
         spikesnap="hovered data",
@@ -504,16 +270,75 @@ def _build_figure(
         spikethickness=1,
         spikecolor="rgba(60,60,60,0.45)",
     )
-    fig.update_xaxes(title_text="Timestamp", row=n_rows, col=1)
-    if rp is not None:
-        fig.update_yaxes(title_text="Price", row=rp, col=1)
-    if rv is not None:
-        fig.update_yaxes(title_text="Volume", row=rv, col=1)
-    if rr is not None:
-        fig.update_yaxes(title_text="RSI", range=[0, 100], row=rr, col=1)
-    if rs is not None:
-        fig.update_yaxes(title_text="Position", row=rs, col=1, secondary_y=False)
-        fig.update_yaxes(title_text="Equity", row=rs, col=1, secondary_y=True)
+    fig.update_yaxes(title_text="Price")
+    return fig
+
+
+def _build_position_equity_figure(df: pd.DataFrame, title: str) -> go.Figure:
+    """Position (left axis) and equity (right axis) for strategy replay."""
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    x = df["timestamp"]
+    if "pos" in df.columns:
+        fig.add_trace(
+            go.Scatter(x=x, y=df["pos"], name="Position", line=dict(width=2)),
+            secondary_y=False,
+        )
+    if "equity" in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=df["equity"],
+                name="Equity (MTM mid)",
+                line=dict(width=2, dash="dash"),
+            ),
+            secondary_y=True,
+        )
+    fig.update_layout(title=title, height=320, **_hover_layout_kwargs())
+    fig.update_xaxes(title_text="Timestamp")
+    fig.update_yaxes(title_text="Position", secondary_y=False)
+    fig.update_yaxes(title_text="Equity", secondary_y=True)
+    return fig
+
+
+def _build_volume_figure(
+    df: pd.DataFrame,
+    has_strategy: bool,
+    title: str,
+) -> go.Figure:
+    """L1 book volume and quoted sizes (separate from price chart)."""
+    fig = go.Figure()
+    x = df["timestamp"]
+    if df["bid_vol_1"].notna().any():
+        fig.add_trace(go.Scatter(x=x, y=df["bid_vol_1"], name="Mkt bid vol L1"))
+    if df["ask_vol_1"].notna().any():
+        fig.add_trace(go.Scatter(x=x, y=df["ask_vol_1"], name="Mkt ask vol L1"))
+    if has_strategy and "bid_size" in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=df["bid_size"],
+                name="Quoted bid size",
+                line=dict(dash="dot"),
+                connectgaps=False,
+            )
+        )
+    if has_strategy and "ask_size" in df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=df["ask_size"],
+                name="Quoted ask size",
+                line=dict(dash="dot"),
+                connectgaps=False,
+            )
+        )
+    fig.update_layout(
+        title=title,
+        height=360,
+        **_hover_layout_kwargs(),
+    )
+    fig.update_xaxes(title_text="Timestamp")
+    fig.update_yaxes(title_text="Volume")
     return fig
 
 
@@ -620,13 +445,14 @@ def _render_product_block(
     trades_path: str,
     strategy_id: str | None,
     initial_cash: float,
-    rsi_period: int,
     ema_period: int,
     use_window: bool,
     t_min: int | None,
     t_max: int | None,
     algo_fp: tuple[int, ...],
     subdir: str | None = None,
+    show_product_heading: bool = True,
+    show_pnl_metrics: bool = True,
 ) -> None:
     df, summ = _compute_frame(
         prices_path,
@@ -653,43 +479,50 @@ def _render_product_block(
     if use_window and t_max is not None:
         trades_pts = trades_pts[trades_pts["timestamp"] <= t_max]
 
+    if show_product_heading:
+        st.subheader(product)
+
     tab_full, tab_em_mid = st.tabs(["Full replay", "EMERALDS · mid / fair · volume"])
 
     with tab_full:
-        available_panels = _available_panels(has_strategy)
-        with st.expander("Chart panels (show / order)", expanded=False):
-            st.caption(
-                "Hide rows with **Hide**, restore via **Add panel**. **RSI** / **EMA** use book **mid**."
-            )
-            panel_order = _render_panel_controls(product, available_panels)
+        summ_windowed = replay_summary(df, initial_cash) if has_strategy else None
 
-        fig = _build_figure(
+        fig_px = _build_price_figure(
             df,
             trades_pts,
             has_strategy=has_strategy,
-            product=product,
-            rsi_period=rsi_period,
             ema_period=ema_period,
-            panel_order=panel_order,
+            title=f"{product} — price, fair, tape",
         )
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption(
-            "Hover is synced by **time** across stacked rows (recent Streamlit + Plotly)."
-        )
+        st.plotly_chart(fig_px, use_container_width=True)
 
-        if summ:
+        fig_vol = _build_volume_figure(
+            df,
+            has_strategy=has_strategy,
+            title=f"{product} — volume",
+        )
+        st.plotly_chart(fig_vol, use_container_width=True)
+
+        if has_strategy:
+            fig_pe = _build_position_equity_figure(
+                df,
+                title=f"{product} — position & equity",
+            )
+            st.plotly_chart(fig_pe, use_container_width=True)
+
+        if summ_windowed and show_pnl_metrics:
             cols = st.columns(4)
-            cols[0].metric("Ending position", f"{summ['ending_pos']}")
-            cols[1].metric("Cash", f"{summ['cash']:.2f}")
-            cols[2].metric("Equity (approx)", f"{summ['equity']:.2f}")
-            cols[3].metric("PnL vs start", f"{summ['pnl']:+,.2f}")
+            cols[0].metric("Ending position", f"{summ_windowed['ending_pos']}")
+            cols[1].metric("Cash", f"{summ_windowed['cash']:.2f}")
+            cols[2].metric("Equity (approx)", f"{summ_windowed['equity']:.2f}")
+            cols[3].metric("PnL vs start", f"{summ_windowed['pnl']:+,.2f}")
             st.caption(
-                f"Buy volume filled (sim): {summ['buy_fills']} · "
-                f"Sell volume filled (sim): {summ['sell_fills']}"
+                f"Buy volume filled (sim): {summ_windowed['buy_fills']} · "
+                f"Sell volume filled (sim): {summ_windowed['sell_fills']}"
             )
         elif strategy_id:
             st.info(f"No replay overlay for **{product}** (strategy does not trade this product).")
-        else:
+        elif not strategy_id:
             st.info("Pick a strategy that includes this product for simulated PnL and overlays.")
 
     with tab_em_mid:
@@ -766,9 +599,6 @@ def main() -> None:
 
         # ── Indicator settings ────────────────────────────────────────────
         st.subheader("Indicators")
-        rsi_period = int(
-            st.number_input("RSI period (Wilder, on mid)", min_value=2, max_value=55, value=14, step=1)
-        )
         ema_period = int(
             st.number_input("EMA period (on mid, chart overlay)", min_value=2, max_value=200, value=20, step=1)
         )
@@ -841,18 +671,50 @@ def main() -> None:
             st.warning("No products found in the prices CSV.")
             st.stop()
 
+    # Multi-product strategy: PnL per symbol (same time window as charts) + total
+    if strategy_id and len(prod_list) > 1:
+        pnl_cells: list[tuple[str, float]] = []
+        for prod in prod_list:
+            df_i, summ0 = _compute_frame(
+                prices_path,
+                trades_path,
+                prod,
+                strategy_id,
+                float(initial_cash),
+                algo_fp,
+                subdir=algo_subdir,
+            )
+            if not summ0:
+                continue
+            df_w = _apply_time_window(
+                df_i, t_min if use_window else None, t_max if use_window else None
+            )
+            if df_w.empty:
+                continue
+            s = replay_summary(df_w, initial_cash)
+            pnl_cells.append((prod, float(s["pnl"])))
+        if pnl_cells:
+            st.markdown("**Simulated PnL** (per product · same window as charts)")
+            cols = st.columns(len(pnl_cells) + 1)
+            total = 0.0
+            for i, (sym, pnl) in enumerate(pnl_cells):
+                cols[i].metric(sym, f"{pnl:+,.2f}")
+                total += pnl
+            cols[-1].metric("Total", f"{total:+,.2f}")
+            st.divider()
+
     common_kwargs: dict = dict(
         prices_path=prices_path,
         trades_path=trades_path,
         strategy_id=strategy_id,
         initial_cash=initial_cash,
-        rsi_period=rsi_period,
         ema_period=ema_period,
         use_window=use_window,
         t_min=t_min,
         t_max=t_max,
         algo_fp=algo_fp,
         subdir=algo_subdir,
+        show_product_heading=len(prod_list) == 1,
     )
 
     if len(prod_list) == 1:
