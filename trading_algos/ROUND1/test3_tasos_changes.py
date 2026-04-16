@@ -6,6 +6,12 @@ INTARIAN_PEPPER_ROOT = "INTARIAN_PEPPER_ROOT"
 
 _BOOT_LEN = 10
 
+# Replay note (gui/replay_engine.py): fills come only from **trades CSV** at this
+# timestamp (tape), not from eating the displayed book depth. So position ramps
+# over many ticks when each tick has little/no matching tape volume. Order size
+# should be the full **want** (room to limit); do not cap by L1 `avail` or you
+# discard fills when tape size exceeds top-of-book size on a tick.
+
 
 class Trader:
     def __init__(self):
@@ -89,20 +95,16 @@ class Trader:
                     if self._pepper_hold == "long":
                         if current_position < max_limit and order_depth.sell_orders:
                             best_ask = min(order_depth.sell_orders.keys())
-                            avail = -order_depth.sell_orders[best_ask]
                             want = max_limit - current_position
-                            buy_vol = min(avail, want)
-                            if buy_vol > 0:
-                                orders.append(Order(product, best_ask, buy_vol))
+                            if want > 0:
+                                orders.append(Order(product, best_ask, want))
 
                     elif self._pepper_hold == "short":
                         if current_position > -max_limit and order_depth.buy_orders:
                             best_bid = max(order_depth.buy_orders.keys())
-                            avail = order_depth.buy_orders[best_bid]
                             want = current_position + max_limit
-                            sell_vol = min(avail, want)
-                            if sell_vol > 0:
-                                orders.append(Order(product, best_bid, -sell_vol))
+                            if want > 0:
+                                orders.append(Order(product, best_bid, -want))
 
             result[product] = orders
 
