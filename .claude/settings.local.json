@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python visualise.py)",
+      "Bash(wc -l /c/Users/MatKa/Trading-Prosperity/ROUND1/*.csv)",
+      "Bash(cut -d';' -f2,3)",
+      "Bash(python analyze_bot.py)",
+      "Bash(pip install:*)"
+    ]
+  }
+}
