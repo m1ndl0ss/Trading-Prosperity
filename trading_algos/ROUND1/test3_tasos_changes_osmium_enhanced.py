@@ -29,13 +29,16 @@ INTARIAN_PEPPER_ROOT = "INTARIAN_PEPPER_ROOT"
 _BOOT_LEN = 10
 _TD_OSMIUM = "osmium_enh"
 
+#ANCHOR_BLEND=0.6162  BASE_SIZE=60 
+# EWMA_ALPHA=0.1872  FADE_MULT=0.8173  TAKE_CAP=16  TAKE_DISLOC=17.94
+
 FAIR_REF = 10_000.0
-FADE_MULT = 1.35
-EWMA_ALPHA = 0.08
-ANCHOR_BLEND = 0.5077  # weight on EWMA vs FAIR_REF for "anchor"
-TAKE_DISLOC = 5.0  # |mid - anchor| beyond this → consider lift/hit
-TAKE_CAP = 18
-BASE_SIZE = 40 # per-side cap before skew (below full80 snap-back)
+FADE_MULT=0.8173
+EWMA_ALPHA=0.1872
+ANCHOR_BLEND = 0.6162  # weight on EWMA vs FAIR_REF for "anchor"
+TAKE_DISLOC = 17.94  # |mid - anchor| beyond this → consider lift/hit
+TAKE_CAP = 16
+BASE_SIZE=60 # per-side cap before skew (below full80 snap-back)
 
 
 def _loads_td(raw: str) -> Dict[str, Any]:
