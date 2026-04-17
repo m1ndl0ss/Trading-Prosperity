@@ -30,14 +30,14 @@ _TD_KEY = "mm_mid_prev"
 
 # Starfruit-equivalent params from round_1_v6.py (tune for osmium if needed)
 PARAMS: Dict[str, Any] = {
-    "take_width": 1,
-    "clear_width": 0,
+    "take_width": 1.784,
+    "clear_width": 1,
     "prevent_adverse": True,
-    "adverse_volume": 15,
-    "reversion_beta": -0.229,
+    "adverse_volume": 10,
+    "reversion_beta": -0.2763,
     "disregard_edge": 1,
-    "join_edge": 0,
-    "default_edge": 1,
+    "join_edge": 1,
+    "default_edge": 2,
 }
 
 
