@@ -300,6 +300,97 @@ def _build_position_equity_figure(df: pd.DataFrame, title: str) -> go.Figure:
     return fig
 
 
+def _build_book_depth_figure(df: pd.DataFrame, title: str) -> go.Figure | None:
+    """
+    L1–L3 bid/ask prices (top) and unsigned volumes (bottom) from CSV book snapshot.
+    Returns None if no multi-level columns or all empty.
+    """
+    need = [f"bid_px_{i}" for i in (1, 2, 3)] + [f"ask_px_{i}" for i in (1, 2, 3)]
+    if not all(c in df.columns for c in need):
+        return None
+    if not any(df[c].notna().any() for c in need):
+        return None
+
+    bid_colors = ("#1b5e20", "#2e7d32", "#66bb6a")
+    ask_colors = ("#b71c1c", "#c62828", "#ef5350")
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        row_heights=(0.58, 0.42),
+        subplot_titles=("Book prices (L1–L3)", "Book volume at each level (unsigned)"),
+    )
+    x = df["timestamp"]
+
+    for i in (1, 2, 3):
+        bp, ap = f"bid_px_{i}", f"ask_px_{i}"
+        if df[bp].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=df[bp],
+                    name=f"Bid L{i}",
+                    line=dict(width=1 if i == 1 else 1, color=bid_colors[i - 1], dash="solid" if i == 1 else "dot"),
+                    legendgroup="bid",
+                ),
+                row=1,
+                col=1,
+            )
+        if df[ap].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=df[ap],
+                    name=f"Ask L{i}",
+                    line=dict(width=1 if i == 1 else 1, color=ask_colors[i - 1], dash="solid" if i == 1 else "dot"),
+                    legendgroup="ask",
+                ),
+                row=1,
+                col=1,
+            )
+
+    for i in (1, 2, 3):
+        bv, av = f"bid_vol_{i}", f"ask_vol_{i}"
+        if bv in df.columns and df[bv].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=df[bv],
+                    name=f"Bid vol L{i}",
+                    line=dict(width=1, color=bid_colors[i - 1], dash="dash"),
+                    legendgroup="bvol",
+                    showlegend=True,
+                ),
+                row=2,
+                col=1,
+            )
+        if av in df.columns and df[av].notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=df[av],
+                    name=f"Ask vol L{i}",
+                    line=dict(width=1, color=ask_colors[i - 1], dash="dash"),
+                    legendgroup="avol",
+                    showlegend=True,
+                ),
+                row=2,
+                col=1,
+            )
+
+    fig.update_layout(
+        title=title,
+        height=560,
+        **_hover_layout_kwargs(),
+    )
+    fig.update_xaxes(title_text="Timestamp", row=2, col=1)
+    fig.update_yaxes(title_text="Price", row=1, col=1)
+    fig.update_yaxes(title_text="Volume", row=2, col=1)
+    return fig
+
+
 def _build_volume_figure(
     df: pd.DataFrame,
     has_strategy: bool,
@@ -453,6 +544,7 @@ def _render_product_block(
     subdir: str | None = None,
     show_product_heading: bool = True,
     show_pnl_metrics: bool = True,
+    show_book_depth: bool = True,
 ) -> None:
     df, summ = _compute_frame(
         prices_path,
@@ -502,6 +594,16 @@ def _render_product_block(
             title=f"{product} — volume",
         )
         st.plotly_chart(fig_vol, use_container_width=True)
+
+        if show_book_depth:
+            fig_depth = _build_book_depth_figure(
+                df,
+                title=f"{product} — order book depth (L1–L3 from CSV)",
+            )
+            if fig_depth is not None:
+                st.plotly_chart(fig_depth, use_container_width=True)
+            else:
+                st.caption("No L1–L3 book columns in replay frame (older data or missing levels).")
 
         if has_strategy:
             fig_pe = _build_position_equity_figure(
@@ -601,6 +703,11 @@ def main() -> None:
         st.subheader("Indicators")
         ema_period = int(
             st.number_input("EMA period (on mid, chart overlay)", min_value=2, max_value=200, value=20, step=1)
+        )
+        show_book_depth = st.checkbox(
+            "Show order book depth (L1–L3 prices & volumes)",
+            value=True,
+            help="Uses bid/ask_price_{1,2,3} and volumes from the prices CSV.",
         )
 
         st.divider()
@@ -715,6 +822,7 @@ def main() -> None:
         algo_fp=algo_fp,
         subdir=algo_subdir,
         show_product_heading=len(prod_list) == 1,
+        show_book_depth=show_book_depth,
     )
 
     if len(prod_list) == 1:

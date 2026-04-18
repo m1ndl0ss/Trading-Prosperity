@@ -49,6 +49,24 @@ def best_bid_ask(depth: OrderDepth) -> Tuple[int, int]:
     return max(depth.buy_orders), min(depth.sell_orders)
 
 
+def book_levels_from_row(row: pd.Series) -> Dict[str, Any]:
+    """
+    Extract L1–L3 bid/ask prices and unsigned volumes from a prices CSV row
+    (for dashboard / replay DataFrame columns).
+    """
+    out: Dict[str, Any] = {}
+    for i in (1, 2, 3):
+        bp = row.get(f"bid_price_{i}")
+        bv = row.get(f"bid_volume_{i}")
+        ap = row.get(f"ask_price_{i}")
+        av = row.get(f"ask_volume_{i}")
+        out[f"bid_px_{i}"] = int(bp) if pd.notna(bp) else None
+        out[f"bid_vol_{i}"] = int(bv) if pd.notna(bv) else None
+        out[f"ask_px_{i}"] = int(ap) if pd.notna(ap) else None
+        out[f"ask_vol_{i}"] = int(av) if pd.notna(av) else None
+    return out
+
+
 def _load_td(raw: str) -> Dict[str, Any]:
     if not raw:
         return {}
@@ -96,16 +114,16 @@ def market_frame(prices: pd.DataFrame, product: str) -> pd.DataFrame:
         mid = float(row["mid_price"]) if pd.notna(row.get("mid_price")) else (best_bid + best_ask) / 2.0
         bv = row.get("bid_volume_1")
         av = row.get("ask_volume_1")
-        rows.append(
-            {
-                "timestamp": int(ts),
-                "best_bid": best_bid,
-                "best_ask": best_ask,
-                "mid": mid,
-                "bid_vol_1": int(bv) if pd.notna(bv) else None,
-                "ask_vol_1": int(av) if pd.notna(av) else None,
-            }
-        )
+        row_dict: Dict[str, Any] = {
+            "timestamp": int(ts),
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "mid": mid,
+            "bid_vol_1": int(bv) if pd.notna(bv) else None,
+            "ask_vol_1": int(av) if pd.notna(av) else None,
+        }
+        row_dict.update(book_levels_from_row(row))
+        rows.append(row_dict)
     return pd.DataFrame(rows)
 
 
@@ -200,31 +218,31 @@ def replay_to_dataframe(
         sim_buy_px = float(bid_o.price) if bid_o and buy_step > 0 else float("nan")
         sim_sell_px = float(ask_o.price) if ask_o and sell_step > 0 else float("nan")
 
-        records.append(
-            {
-                "timestamp": int(ts),
-                "best_bid": best_bid,
-                "best_ask": best_ask,
-                "mid": mid,
-                "bid_vol_1": bid_vol_1,
-                "ask_vol_1": ask_vol_1,
-                "fair": fair,
-                "ema": ema,
-                "bid_px": bid_o.price if bid_o else None,
-                "ask_px": ask_o.price if ask_o else None,
-                "bid_size": bid_o.quantity if bid_o else None,
-                "ask_size": -ask_o.quantity if ask_o else None,
-                "pos": pos,
-                "cash": cash,
-                "equity": equity,
-                "buy_fills_step": buy_step,
-                "sell_fills_step": sell_step,
-                "sim_buy_px": sim_buy_px,
-                "sim_sell_px": sim_sell_px,
-                "sim_buy_vol": buy_step,
-                "sim_sell_vol": sell_step,
-            }
-        )
+        rec: Dict[str, Any] = {
+            "timestamp": int(ts),
+            "best_bid": best_bid,
+            "best_ask": best_ask,
+            "mid": mid,
+            "bid_vol_1": bid_vol_1,
+            "ask_vol_1": ask_vol_1,
+            "fair": fair,
+            "ema": ema,
+            "bid_px": bid_o.price if bid_o else None,
+            "ask_px": ask_o.price if ask_o else None,
+            "bid_size": bid_o.quantity if bid_o else None,
+            "ask_size": -ask_o.quantity if ask_o else None,
+            "pos": pos,
+            "cash": cash,
+            "equity": equity,
+            "buy_fills_step": buy_step,
+            "sell_fills_step": sell_step,
+            "sim_buy_px": sim_buy_px,
+            "sim_sell_px": sim_sell_px,
+            "sim_buy_vol": buy_step,
+            "sim_sell_vol": sell_step,
+        }
+        rec.update(book_levels_from_row(row))
+        records.append(rec)
 
     return pd.DataFrame(records)
 
