@@ -1,122 +1,93 @@
 import math
-import statistics
 from statistics import NormalDist
-from typing import Dict, List, Tuple
+from typing import Dict, List
+from datamodel import Order, TradingState, OrderDepth
 
-from datamodel import Order, OrderDepth, TradingState
+# --- 1. REGRESSION COEFFICIENTS (From your 3-day analysis) ---
+A, B, C = 4.6520, -8.3052, 3.9732
+
+# --- 2. HYPERPARAMETERS ---
+SCALP_THRESHOLD = 2.0      # Credits of mispricing to trigger a trade
+EMA_WINDOW = 20            # "Fast" EMA for mean reversion
+EMA_THRESHOLD = 4.0        # Credits away from EMA to trade underlying
+MIN_EXTRINSIC = 1.0        # Disregard options with too little "time value"
 
 _N = NormalDist()
 
-# --- CONSTANTS ---
-HYDROGEL_PACK = "HYDROGEL_PACK"
-VELVETFRUIT_EXTRACT = "VELVETFRUIT_EXTRACT"
-VOUCHER_STRIKES = (4000, 4500, 5000, 5100, 5200, 5300, 5400, 5500, 6000, 6500)
-OPTION_SYMBOLS = tuple(f"VEV_{k}" for k in VOUCHER_STRIKES)
-
-POS_LIMITS = {HYDROGEL_PACK: 200, VELVETFRUIT_EXTRACT: 200, **{os: 300 for os in OPTION_SYMBOLS}}
-
-# --- UPDATED HYPERPARAMETERS ---
-DAY = 5.0  # Round 3 starts at 5
-EDGE_TAKE = 3.0   # Require a 3-credit edge to cross the spread (be more picky!)
-EDGE_MAKE = 0.5   # Target 0.5 credits for limit orders
-DEFAULT_VOL = 0.02 # 2% Annualized (Velvetfruit is very stable)
-
-def bs_call(S: float, K: float, T: float, sigma: float) -> Tuple[float, float]:
-    # Standard BS formula with T in years
+def bs_call(S, K, T, sigma):
     if T <= 0 or sigma <= 0 or S <= 0:
-        return max(S - K, 0.0), (1.0 if S > K else 0.0)
-    d1 = (math.log(S/K) + (0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
+        return max(0, S - K), (1.0 if S > K else 0.0)
+    d1 = (math.log(S / K) + (0.5 * sigma**2) * T) / (sigma * math.sqrt(T))
     d2 = d1 - sigma * math.sqrt(T)
     return S * _N.cdf(d1) - K * _N.cdf(d2), _N.cdf(d1)
 
-def find_iv(C: float, S: float, K: float, T: float) -> float:
-    low, high = 0.0001, 1.0
-    for _ in range(12):
-        mid = (low + high) / 2
-        price, _ = bs_call(S, K, T, mid)
-        if price > C: high = mid
-        else: low = mid
-    return (low + high) / 2
-
-class ProductTrader:
-    def __init__(self, name: str, state: TradingState):
-        self.name = name
-        self.orders = []
-        self.pos = state.position.get(name, 0)
-        self.limit = POS_LIMITS[name]
-        depth = state.order_depths.get(name)
-        self.buys = sorted(depth.buy_orders.items(), key=lambda x: x[0], reverse=True) if depth else []
-        self.sells = sorted(depth.sell_orders.items(), key=lambda x: x[0]) if depth else []
-        self.best_bid = self.buys[0][0] if self.buys else None
-        self.best_ask = self.sells[0][0] if self.sells else None
-        self.mid = (self.best_bid + self.best_ask) / 2.0 if (self.best_bid and self.best_ask) else None
-
-    def buy(self, price, vol):
-        room = self.limit - self.pos
-        if room > 0:
-            q = min(abs(vol), room)
-            self.orders.append(Order(self.name, int(price), q))
-            self.pos += q
-
-    def sell(self, price, vol):
-        room = self.limit + self.pos
-        if room > 0:
-            q = min(abs(vol), room)
-            self.orders.append(Order(self.name, int(price), -q))
-            self.pos -= q
-
 class Trader:
+    def __init__(self):
+        self.ema_extract = None
+        self.alpha = 2 / (EMA_WINDOW + 1)
+
     def run(self, state: TradingState):
         result = {}
-        extract = ProductTrader(VELVETFRUIT_EXTRACT, state)
-        vouchers = [ProductTrader(s, state) for s in OPTION_SYMBOLS]
         
-        # TTE in years (assuming 365 days per year)
-        tte_days = max(1e-5, DAY - (state.timestamp / 1_000_000.0))
-        tte_years = tte_days / 365.0
+        # --- 3. PREPARE UNDERLYING ---
+        extract_depth = state.order_depths.get("VELVETFRUIT_EXTRACT")
+        if not extract_depth or not extract_depth.buy_orders: return {}, 0, ""
         
-        # Calculate Fair IV from liquid strikes
-        market_ivs = []
-        if extract.mid:
-            for v in vouchers:
-                strike = int(v.name.split('_')[-1])
-                if v.mid and 4500 <= strike <= 5500 and v.mid > 2.0:
-                    market_ivs.append(find_iv(v.mid, extract.mid, strike, tte_years))
+        s_best_bid = max(extract_depth.buy_orders.keys())
+        s_best_ask = min(extract_depth.sell_orders.keys())
+        s_mid = (s_best_bid + s_best_ask) / 2.0
         
-        fair_iv = statistics.median(market_ivs) if market_ivs else DEFAULT_VOL
+        # Update EMA for Mean Reversion
+        if self.ema_extract is None: self.ema_extract = s_mid
+        else: self.ema_extract = self.alpha * s_mid + (1 - self.alpha) * self.ema_extract
+        
+        tte_years = (5.0 - (state.timestamp / 1_000_000.0)) / 365.0
 
-        total_delta = 0.0
-        for v in vouchers:
-            if not v.mid or not extract.mid: continue
-            strike = int(v.name.split('_')[-1])
-            fair_px, delta = bs_call(extract.mid, strike, tte_years, fair_iv)
-            total_delta += v.pos * delta
+        # --- 4. IV SCALPING (The Parabola Alpha) ---
+        for strike in [4000, 4500, 5000, 5100, 5200, 5300, 5400, 5500, 6000, 6500]:
+            symbol = f"VEV_{strike}"
+            depth = state.order_depths.get(symbol)
+            if not depth or not depth.buy_orders: continue
+
+            # Filter for Extrinsic Value (Hedgehog logic: disregard bottom-left outliers)
+            intrinsic = max(0, s_mid - strike)
+            market_mid = (max(depth.buy_orders.keys()) + min(depth.sell_orders.keys())) / 2.0
+            if (market_mid - intrinsic) < MIN_EXTRINSIC: continue
+
+            # A. Detrending: Get Fair IV from your fitted parabola
+            m = strike / s_mid
+            v_hat = A * (m**2) + B * m + C
             
-            # Arb Logic
-            if v.best_ask < fair_px - EDGE_TAKE:
-                v.buy(v.best_ask, 300)
-            elif v.best_bid > fair_px + EDGE_TAKE:
-                v.sell(v.best_bid, 300)
+            # B. Theoretical Price
+            fair_px, _ = bs_call(s_mid, strike, tte_years, v_hat)
             
-            # MM Logic
-            v.buy(fair_px - EDGE_MAKE, 300)
-            v.sell(fair_px + EDGE_MAKE, 300)
-            result[v.name] = v.orders
+            # C. Scalping Signal (Figure 6c logic: Price Deviations)
+            orders = []
+            pos = state.position.get(symbol, 0)
+            
+            if min(depth.sell_orders.keys()) < fair_px - SCALP_THRESHOLD:
+                vol = 300 - pos
+                if vol > 0: orders.append(Order(symbol, min(depth.sell_orders.keys()), vol))
+            elif max(depth.buy_orders.keys()) > fair_px + SCALP_THRESHOLD:
+                vol = -300 - pos
+                if abs(vol) > 0: orders.append(Order(symbol, max(depth.buy_orders.keys()), vol))
+            
+            result[symbol] = orders
 
-        # Delta Hedging
-        if extract.mid:
-            target_pos = max(-200, min(200, -int(total_delta)))
-            diff = target_pos - extract.pos
-            if abs(diff) >= 5: # Hedge threshold
-                if diff > 0: extract.buy(extract.best_ask, diff)
-                else: extract.sell(extract.best_bid, abs(diff))
-            result[extract.name] = extract.orders
-
-        # Hydrogel MM
-        hydro = ProductTrader(HYDROGEL_PACK, state)
-        if hydro.mid:
-            hydro.buy(hydro.mid - 1, 200)
-            hydro.sell(hydro.mid + 1, 200)
-            result[hydro.name] = hydro.orders
+        # --- 5. MEAN REVERSION (The "Hedge against bad luck") ---
+        # Instead of strict delta hedging, we trade the underlying's own alpha
+        extract_pos = state.position.get("VELVETFRUIT_EXTRACT", 0)
+        extract_orders = []
+        
+        if s_mid < self.ema_extract - EMA_THRESHOLD:
+            # Price is too low compared to EMA -> BUY
+            vol = 200 - extract_pos
+            if vol > 0: extract_orders.append(Order("VELVETFRUIT_EXTRACT", s_best_ask, vol))
+        elif s_mid > self.ema_extract + EMA_THRESHOLD:
+            # Price is too high compared to EMA -> SELL
+            vol = -200 - extract_pos
+            if abs(vol) > 0: extract_orders.append(Order("VELVETFRUIT_EXTRACT", s_best_bid, vol))
+            
+        result["VELVETFRUIT_EXTRACT"] = extract_orders
 
         return result, 0, ""
