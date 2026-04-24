@@ -1,0 +1,9 @@
+# Ignore large simulation data
+*.log
+*.json
+ROUND3/*.log
+ROUND3/*.json
+
+# Ignore Python cache
+__pycache__/
+*.pyc
