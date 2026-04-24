@@ -174,7 +174,12 @@ def replay_to_dataframe(
             {product: pos},
             {},
         )
-        orders_dict, _, td = trader.run(state)
+        orders_dict, conv, td = trader.run(state)
+        # jmerle Orchids-style: non-zero `conversions` flattens pre-tick position
+        # before orders (e.g. convert(-pos)); mark at mid in replay when fees unknown.
+        if conv != 0:
+            cash += pos * mid
+            pos = 0
         out = orders_dict.get(product, [])
         bid_o = next((o for o in out if o.quantity > 0), None)
         ask_o = next((o for o in out if o.quantity < 0), None)

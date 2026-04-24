@@ -36,6 +36,24 @@ EMERALDS = "EMERALDS"
 
 _DAY_RE = re.compile(r"day_(-?\d+)\.csv$", re.IGNORECASE)
 
+# Full replay tab: which charts to show and default top-to-bottom order.
+_CHART_KEYS: tuple[str, ...] = ("price", "rsi", "volume", "book_depth", "position_equity")
+_CHART_LABELS: dict[str, str] = {
+    "price": "Price, fair, tape",
+    "rsi": "RSI (mid)",
+    "volume": "Volume",
+    "book_depth": "Book depth (L1–L3)",
+    "position_equity": "Position & equity",
+}
+_DEFAULT_CHART_ORDER: list[str] = list(_CHART_KEYS)
+
+# Plotly: pan + scroll-zoom so you can move around inside each chart easily.
+_PLOTLY_CHART_CONFIG: dict = {
+    "scrollZoom": True,
+    "displayModeBar": True,
+    "doubleClick": "reset",
+}
+
 
 def _scan_data_rounds() -> list[str]:
     """Return sorted list of subdirectory names under Data/."""
@@ -73,6 +91,51 @@ def _ema_mid(close: pd.Series, period: int) -> pd.Series:
     c = close.astype(float)
     p = max(1, int(period))
     return c.ewm(span=p, adjust=False).mean()
+
+
+def _rsi_wilder(close: pd.Series, period: int = 14) -> pd.Series:
+    """RSI (Wilder / standard trading) on ``close``; returns 0–100 series with NaN warmup."""
+    c = close.astype(float)
+    p = max(2, int(period))
+    delta = c.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = gain.ewm(alpha=1.0 / p, min_periods=p, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / p, min_periods=p, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi
+
+
+def _bollinger_bands(
+    close: pd.Series, period: int, num_std: float
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Classic Bollinger on ``close``: SMA middle, upper/lower at ± num_std · rolling stdev (ddof=0)."""
+    c = close.astype(float)
+    p = max(2, int(period))
+    k = max(0.01, float(num_std))
+    mid = c.rolling(window=p, min_periods=p).mean()
+    std = c.rolling(window=p, min_periods=p).std(ddof=0)
+    upper = mid + k * std
+    lower = mid - k * std
+    return mid, upper, lower
+
+
+def _normalize_chart_order(raw: list[str] | None) -> list[str]:
+    """Valid unique order of chart keys; missing keys appended in default order."""
+    if not raw:
+        return list(_DEFAULT_CHART_ORDER)
+    seen: set[str] = set()
+    out: list[str] = []
+    for k in raw:
+        if k in _CHART_KEYS and k not in seen:
+            out.append(k)
+            seen.add(k)
+    for k in _CHART_KEYS:
+        if k not in seen:
+            out.append(k)
+            seen.add(k)
+    return out
 
 
 @st.cache_data
@@ -323,6 +386,8 @@ def _build_price_figure(
     has_strategy: bool,
     ema_period: int,
     title: str,
+    bb_period: int | None = None,
+    bb_std: float = 2.0,
 ) -> go.Figure:
     """Bid / ask / mid / fair / tape / sim fills (price axis only)."""
     x = df["timestamp"]
@@ -342,6 +407,44 @@ def _build_price_figure(
                 line=dict(width=2, color="#ff7f0e"),
             )
         )
+
+    if bb_period is not None:
+        p_bb = max(2, int(bb_period))
+        bb_mid, bb_upper, bb_lower = _bollinger_bands(df["mid"], p_bb, bb_std)
+        bb_color = "rgba(90, 90, 160, 0.85)"
+        bb_fill = "rgba(90, 90, 160, 0.14)"
+        if bb_upper.notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=bb_upper,
+                    name=f"Bollinger upper ({p_bb}, {bb_std:g}σ)",
+                    line=dict(width=1, color=bb_color),
+                    legendgroup="bb",
+                )
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=bb_lower,
+                    name=f"Bollinger lower ({p_bb}, {bb_std:g}σ)",
+                    line=dict(width=1, color=bb_color),
+                    fill="tonexty",
+                    fillcolor=bb_fill,
+                    legendgroup="bb",
+                    showlegend=False,
+                )
+            )
+        if bb_mid.notna().any():
+            fig.add_trace(
+                go.Scatter(
+                    x=x,
+                    y=bb_mid,
+                    name=f"Bollinger basis SMA ({p_bb})",
+                    line=dict(width=1, dash="dash", color=bb_color),
+                    legendgroup="bb",
+                )
+            )
 
     if has_strategy and "fair" in df.columns:
         fair = df["fair"]
@@ -436,6 +539,7 @@ def _build_price_figure(
     fig.update_layout(
         title=title,
         height=520,
+        dragmode="pan",
         **_hover_layout_kwargs(),
     )
     fig.update_xaxes(
@@ -470,10 +574,40 @@ def _build_position_equity_figure(df: pd.DataFrame, title: str) -> go.Figure:
             ),
             secondary_y=True,
         )
-    fig.update_layout(title=title, height=320, **_hover_layout_kwargs())
+    fig.update_layout(title=title, height=320, dragmode="pan", **_hover_layout_kwargs())
     fig.update_xaxes(title_text="Timestamp")
     fig.update_yaxes(title_text="Position", secondary_y=False)
     fig.update_yaxes(title_text="Equity", secondary_y=True)
+    return fig
+
+
+def _build_rsi_figure(df: pd.DataFrame, rsi_period: int, title: str) -> go.Figure:
+    """RSI on mid price; reference bands at 30 / 70."""
+    x = df["timestamp"]
+    mid = df["mid"].astype(float)
+    p = max(2, int(rsi_period))
+    rsi = _rsi_wilder(mid, p)
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=x,
+            y=rsi,
+            name=f"RSI ({p})",
+            line=dict(width=2, color="#9467bd"),
+            connectgaps=False,
+        )
+    )
+    fig.add_hline(y=70.0, line_dash="dash", line_color="rgba(180,50,50,0.55)", annotation_text="70")
+    fig.add_hline(y=30.0, line_dash="dash", line_color="rgba(50,120,50,0.55)", annotation_text="30")
+    fig.add_hline(y=50.0, line_dash="dot", line_color="rgba(100,100,100,0.35)")
+    fig.update_layout(
+        title=title,
+        height=340,
+        dragmode="pan",
+        yaxis=dict(range=[0, 100], title="RSI"),
+        **_hover_layout_kwargs(),
+    )
+    fig.update_xaxes(title_text="Timestamp")
     return fig
 
 
@@ -560,6 +694,7 @@ def _build_book_depth_figure(df: pd.DataFrame, title: str) -> go.Figure | None:
     fig.update_layout(
         title=title,
         height=560,
+        dragmode="pan",
         **_hover_layout_kwargs(),
     )
     fig.update_xaxes(title_text="Timestamp", row=2, col=1)
@@ -603,6 +738,7 @@ def _build_volume_figure(
     fig.update_layout(
         title=title,
         height=360,
+        dragmode="pan",
         **_hover_layout_kwargs(),
     )
     fig.update_xaxes(title_text="Timestamp")
@@ -714,6 +850,10 @@ def _render_product_block(
     strategy_id: str | None,
     initial_cash: float,
     ema_period: int,
+    rsi_period: int,
+    bb_period: int | None,
+    bb_std: float,
+    chart_order: list[str],
     use_window: bool,
     t_min: int | None,
     t_max: int | None,
@@ -756,38 +896,53 @@ def _render_product_block(
     with tab_full:
         summ_windowed = replay_summary(df, initial_cash) if has_strategy else None
 
-        fig_px = _build_price_figure(
-            df,
-            trades_pts,
-            has_strategy=has_strategy,
-            ema_period=ema_period,
-            title=f"{product} — price, fair, tape",
-        )
-        st.plotly_chart(fig_px, use_container_width=True)
-
-        fig_vol = _build_volume_figure(
-            df,
-            has_strategy=has_strategy,
-            title=f"{product} — volume",
-        )
-        st.plotly_chart(fig_vol, use_container_width=True)
-
-        if show_book_depth:
-            fig_depth = _build_book_depth_figure(
-                df,
-                title=f"{product} — order book depth (L1–L3 from CSV)",
-            )
-            if fig_depth is not None:
-                st.plotly_chart(fig_depth, use_container_width=True)
-            else:
-                st.caption("No L1–L3 book columns in replay frame (older data or missing levels).")
-
-        if has_strategy:
-            fig_pe = _build_position_equity_figure(
-                df,
-                title=f"{product} — position & equity",
-            )
-            st.plotly_chart(fig_pe, use_container_width=True)
+        for chart_key in _normalize_chart_order(chart_order):
+            if chart_key == "price":
+                fig_px = _build_price_figure(
+                    df,
+                    trades_pts,
+                    has_strategy=has_strategy,
+                    ema_period=ema_period,
+                    title=f"{product} — price, fair, tape",
+                    bb_period=bb_period,
+                    bb_std=bb_std,
+                )
+                st.plotly_chart(fig_px, use_container_width=True, config=_PLOTLY_CHART_CONFIG)
+            elif chart_key == "rsi":
+                fig_rsi = _build_rsi_figure(
+                    df,
+                    rsi_period,
+                    title=f"{product} — RSI (Wilder, on mid)",
+                )
+                st.plotly_chart(fig_rsi, use_container_width=True, config=_PLOTLY_CHART_CONFIG)
+            elif chart_key == "volume":
+                fig_vol = _build_volume_figure(
+                    df,
+                    has_strategy=has_strategy,
+                    title=f"{product} — volume",
+                )
+                st.plotly_chart(fig_vol, use_container_width=True, config=_PLOTLY_CHART_CONFIG)
+            elif chart_key == "book_depth":
+                if not show_book_depth:
+                    continue
+                fig_depth = _build_book_depth_figure(
+                    df,
+                    title=f"{product} — order book depth (L1–L3 from CSV)",
+                )
+                if fig_depth is not None:
+                    st.plotly_chart(fig_depth, use_container_width=True, config=_PLOTLY_CHART_CONFIG)
+                else:
+                    st.caption(
+                        "No L1–L3 book columns in replay frame (older data or missing levels)."
+                    )
+            elif chart_key == "position_equity":
+                if not has_strategy:
+                    continue
+                fig_pe = _build_position_equity_figure(
+                    df,
+                    title=f"{product} — position & equity",
+                )
+                st.plotly_chart(fig_pe, use_container_width=True, config=_PLOTLY_CHART_CONFIG)
 
         if summ_windowed and show_pnl_metrics:
             cols = st.columns(4)
@@ -881,11 +1036,67 @@ def main() -> None:
         ema_period = int(
             st.number_input("EMA period (on mid, chart overlay)", min_value=2, max_value=200, value=20, step=1)
         )
+        rsi_period = int(
+            st.number_input("RSI period (Wilder, on mid)", min_value=2, max_value=99, value=14, step=1)
+        )
+        show_bb = st.checkbox(
+            "Bollinger bands (on mid, price chart)",
+            value=True,
+            help="SMA ± k·σ envelope on mid; shown on the price plot.",
+        )
+        bb_period = int(
+            st.number_input(
+                "Bollinger period (SMA / σ window)",
+                min_value=2,
+                max_value=200,
+                value=20,
+                step=1,
+                disabled=not show_bb,
+            )
+        )
+        bb_std = float(
+            st.number_input(
+                "Bollinger σ width",
+                min_value=0.5,
+                max_value=4.0,
+                value=2.0,
+                step=0.1,
+                disabled=not show_bb,
+                help="Distance of upper/lower band from the basis in standard deviations.",
+            )
+        )
         show_book_depth = st.checkbox(
             "Show order book depth (L1–L3 prices & volumes)",
             value=True,
             help="Uses bid/ask_price_{1,2,3} and volumes from the prices CSV.",
         )
+
+        st.subheader("Chart layout")
+        st.caption(
+            "Reorder **Full replay** plots (↑ ↓). Inside each chart: **drag** to pan, "
+            "**scroll** to zoom (toolbar also has zoom/pan/home)."
+        )
+        if "chart_order" not in st.session_state:
+            st.session_state.chart_order = list(_DEFAULT_CHART_ORDER)
+        co = _normalize_chart_order(list(st.session_state.chart_order))
+        st.session_state.chart_order = co
+        for i, ck in enumerate(co):
+            r0, r1, r2 = st.columns([5, 1, 1])
+            with r0:
+                st.markdown(f"{i + 1}. {_CHART_LABELS[ck]}")
+            with r1:
+                if st.button("↑", key=f"dash_co_u_{i}", disabled=(i == 0)):
+                    co[i - 1], co[i] = co[i], co[i - 1]
+                    st.session_state.chart_order = co
+                    st.rerun()
+            with r2:
+                if st.button("↓", key=f"dash_co_d_{i}", disabled=(i == len(co) - 1)):
+                    co[i + 1], co[i] = co[i], co[i + 1]
+                    st.session_state.chart_order = co
+                    st.rerun()
+        if st.button("Reset chart order", key="dash_co_reset"):
+            st.session_state.chart_order = list(_DEFAULT_CHART_ORDER)
+            st.rerun()
 
         st.divider()
 
@@ -991,12 +1202,20 @@ def main() -> None:
             cols[-1].metric("Total", f"{total:+,.2f}")
             st.divider()
 
+    chart_order = _normalize_chart_order(
+        list(st.session_state.get("chart_order") or [])
+    )
+
     common_kwargs: dict = dict(
         prices_path=prices_path,
         trades_path=trades_path,
         strategy_id=strategy_id,
         initial_cash=initial_cash,
         ema_period=ema_period,
+        rsi_period=rsi_period,
+        bb_period=(bb_period if show_bb else None),
+        bb_std=bb_std,
+        chart_order=chart_order,
         use_window=use_window,
         t_min=t_min,
         t_max=t_max,
