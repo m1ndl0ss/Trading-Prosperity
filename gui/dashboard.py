@@ -129,6 +129,183 @@ def _apply_time_window(df: pd.DataFrame, t_min: int | None, t_max: int | None) -
     return out
 
 
+def _apply_time_window_prices(
+    prices: pd.DataFrame, use_window: bool, t_min: int | None, t_max: int | None
+) -> pd.DataFrame:
+    if not use_window or prices.empty:
+        return prices
+    out = prices
+    if t_min is not None:
+        out = out[out["timestamp"] >= t_min]
+    if t_max is not None:
+        out = out[out["timestamp"] <= t_max]
+    return out
+
+
+def _vev_symbol_list(products: list[str]) -> list[str]:
+    vev = [p for p in products if str(p).startswith("VEV_")]
+    return sorted(vev, key=lambda s: int(str(s).split("_", 1)[1]))
+
+
+def _vev_wide_mids(prices: pd.DataFrame, vev_cols: list[str]) -> pd.DataFrame:
+    sub = prices[prices["product"].isin(vev_cols)].copy()
+    if sub.empty:
+        return pd.DataFrame()
+    wide = sub.pivot_table(index="timestamp", columns="product", values="mid_price", aggfunc="first")
+    ordered = [c for c in vev_cols if c in wide.columns]
+    if not ordered:
+        return pd.DataFrame()
+    return wide[ordered].sort_index()
+
+
+def _extract_mid_by_timestamp(prices: pd.DataFrame) -> pd.Series:
+    sub = prices[prices["product"] == "VELVETFRUIT_EXTRACT"][
+        ["timestamp", "mid_price"]
+    ].drop_duplicates("timestamp", keep="first")
+    if sub.empty:
+        return pd.Series(dtype=float)
+    s = sub.set_index("timestamp")["mid_price"].astype(float)
+    return s
+
+
+def _build_vev_smile_figure(
+    wide: pd.DataFrame,
+    ts_sel: int,
+    extract_by_ts: pd.Series,
+    title: str,
+) -> go.Figure:
+    if wide.empty or ts_sel not in wide.index:
+        fig = go.Figure()
+        fig.update_layout(title=title + " (no row for this timestamp)", height=400)
+        return fig
+    cols = list(wide.columns)
+    strikes = [int(str(c).split("_", 1)[1]) for c in cols]
+    mids = wide.loc[ts_sel, cols].astype(float).to_numpy()
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=strikes,
+            y=mids,
+            mode="lines+markers",
+            name="Mid (book)",
+            line=dict(width=2),
+        )
+    )
+    if not extract_by_ts.empty and ts_sel in extract_by_ts.index:
+        s = float(extract_by_ts.loc[ts_sel])
+        intrinsic = np.maximum(0.0, s - np.array(strikes, dtype=float))
+        fig.add_trace(
+            go.Scatter(
+                x=strikes,
+                y=intrinsic,
+                mode="lines+markers",
+                name=f"Intrinsic max(0, S−K), S={s:.1f}",
+                line=dict(width=2, dash="dash"),
+            )
+        )
+    fig.update_layout(title=title, height=420, **_hover_layout_kwargs())
+    fig.update_xaxes(title_text="Strike")
+    fig.update_yaxes(title_text="Price")
+    return fig
+
+
+def _build_vev_mid_heatmap_figure(
+    wide: pd.DataFrame,
+    row_stride: int,
+    title: str,
+) -> go.Figure:
+    if wide.empty:
+        fig = go.Figure()
+        fig.update_layout(title=title + " (empty)", height=360)
+        return fig
+    stride = max(1, int(row_stride))
+    samp = wide.iloc[::stride]
+    strikes = [int(str(c).split("_", 1)[1]) for c in samp.columns]
+    z = samp.to_numpy(dtype=float)
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=z,
+            x=strikes,
+            y=samp.index.astype(int),
+            colorscale="Viridis",
+            colorbar=dict(title="Mid"),
+        )
+    )
+    fig.update_layout(title=title, height=480, **_hover_layout_kwargs())
+    fig.update_xaxes(title_text="Strike")
+    fig.update_yaxes(title_text="Timestamp", autorange="reversed")
+    return fig
+
+
+def _render_vev_options_overview(
+    prices: pd.DataFrame,
+    use_window: bool,
+    t_min: int | None,
+    t_max: int | None,
+) -> None:
+    """
+    Cross-strike views for VELVETFRUIT_EXTRACT_VOUCHER symbols (VEV_*).
+    Per-strike book/trades remain in the product tabs; this panel shows smile + heatmap.
+    """
+    pv = _apply_time_window_prices(prices, use_window, t_min, t_max)
+    vev_cols = _vev_symbol_list(pv["product"].dropna().astype(str).unique().tolist())
+    if not vev_cols:
+        return
+
+    wide = _vev_wide_mids(pv, vev_cols)
+    if wide.empty:
+        st.warning("VEV symbols present but pivot produced no rows.")
+        return
+
+    extract_ts = _extract_mid_by_timestamp(pv)
+
+    st.subheader("VEV options — cross-strike")
+    st.caption(
+        "Each **VEV_*** tab below is still the right place for L1–L3, tape, and replay. "
+        "Here: **smile** = mids vs strike at one instant; **heatmap** = mid through time (subsampled rows)."
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        idx_max = len(wide) - 1
+        snap_i = st.slider(
+            "Smile snapshot · row index",
+            0,
+            idx_max,
+            min(idx_max, idx_max // 2),
+            key="vev_smile_row",
+            help="Each step is the next timestamp in the (possibly windowed) prices CSV.",
+        )
+        ts_sel = int(wide.index[snap_i])
+        st.caption(f"Timestamp **{ts_sel}**")
+    with c2:
+        hm_max = max(1, min(600, max(2, len(wide) // 80)))
+        hm_default = max(1, min(hm_max, len(wide) // 1200 or 1))
+        stride = st.slider(
+            "Heatmap row stride (1 = every tick)",
+            min_value=1,
+            max_value=hm_max,
+            value=hm_default,
+            key="vev_hm_stride",
+            help="Larger stride = fewer rows in the heatmap (faster render).",
+        )
+
+    fig_smile = _build_vev_smile_figure(
+        wide,
+        ts_sel,
+        extract_ts,
+        title=f"VEV mid vs strike (snapshot ts={ts_sel})",
+    )
+    st.plotly_chart(fig_smile, use_container_width=True)
+
+    fig_hm = _build_vev_mid_heatmap_figure(
+        wide,
+        stride,
+        title=f"VEV mid heatmap (stride={stride}, {len(wide.iloc[::stride])} time rows)",
+    )
+    st.plotly_chart(fig_hm, use_container_width=True)
+
+
 def _hover_layout_kwargs() -> dict:
     return dict(
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
@@ -777,6 +954,10 @@ def main() -> None:
         if not prod_list:
             st.warning("No products found in the prices CSV.")
             st.stop()
+
+    if _vev_symbol_list(csv_products):
+        _render_vev_options_overview(prices, use_window, t_min, t_max)
+        st.divider()
 
     # Multi-product strategy: PnL per symbol (same time window as charts) + total
     if strategy_id and len(prod_list) > 1:

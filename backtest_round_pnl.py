@@ -25,17 +25,21 @@ Usage (from Trading-Prosperity repo root):
 from __future__ import annotations
 
 import argparse
-import importlib.util
-import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Type
+from typing import Any, Dict, List, Tuple
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from replay_engine import read_prices_csv, replay_summary, replay_to_dataframe, read_trades_csv
+from tape_benchmark import (
+    discover_days,
+    discover_products_union,
+    infer_round_from_trader_path,
+    load_trader,
+    pnl_for_day,
+)
 
 # Display names for common products (optional)
 _SHORT_LABELS: Dict[str, str] = {
@@ -43,90 +47,11 @@ _SHORT_LABELS: Dict[str, str] = {
     "INTARIAN_PEPPER_ROOT": "Root",
 }
 
-_ROUND_DIR_RE = re.compile(r"^ROUND\d+$", re.IGNORECASE)
-
-
-def _load_trader(trader_path: Path) -> Type:
-    spec = importlib.util.spec_from_file_location("trader_under_test", trader_path)
-    if spec is None or spec.loader is None:
-        raise SystemExit(f"Cannot load trader module: {trader_path}")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    cls = getattr(mod, "Trader", None)
-    if not isinstance(cls, type):
-        raise SystemExit(f"No Trader class in {trader_path}")
-    return cls
-
-
-def _infer_round_from_trader_path(trader_path: Path) -> str | None:
-    """Return ROUND2 / TUTORIAL if that segment appears in the trader path."""
-    for part in trader_path.resolve().parts:
-        if part == "TUTORIAL":
-            return "TUTORIAL"
-        if _ROUND_DIR_RE.match(part):
-            return part.upper()
-    return None
-
-
-def _discover_days(data_dir: Path) -> List[Tuple[str, Path, Path]]:
-    pairs: List[Tuple[str, Path, Path]] = []
-    for prices in sorted(data_dir.glob("prices_*.csv")):
-        trades = data_dir / prices.name.replace("prices_", "trades_", 1)
-        if not trades.is_file():
-            continue
-        stem = prices.stem
-        day_key = stem.split("_day_")[-1] if "_day_" in stem else stem
-        pairs.append((day_key, prices, trades))
-    if not pairs:
-        raise SystemExit(f"No prices_*.csv + trades_*.csv pairs in {data_dir}")
-
-    def _sort_key(item: Tuple[str, Path, Path]) -> Tuple[int, str]:
-        dk = item[0]
-        try:
-            return (int(dk), dk)
-        except ValueError:
-            return (10**9, dk)
-
-    pairs.sort(key=_sort_key)
-    return pairs
-
-
-def _discover_products(prices_path: Path) -> List[str]:
-    """All product symbols present in a prices file (stable sort)."""
-    prices = read_prices_csv(prices_path)
-    if "product" not in prices.columns:
-        raise SystemExit(f"No 'product' column in {prices_path}")
-    u = prices["product"].dropna().astype(str).unique().tolist()
-    return sorted(u)
-
-
-def _discover_products_union(day_pairs: List[Tuple[str, Path, Path]]) -> List[str]:
-    """Union of products across all price files for the round (sorted)."""
-    seen: set[str] = set()
-    for _dk, p_csv, _t_csv in day_pairs:
-        seen.update(_discover_products(p_csv))
-    return sorted(seen)
-
-
 def _label(sym: str, width: int) -> str:
     s = _SHORT_LABELS.get(sym, sym)
     if len(s) > width:
         s = s[: max(0, width - 2)] + ".."
     return s
-
-
-def _pnl_for_day(
-    trader_cls: Type,
-    prices_path: Path,
-    trades_path: Path,
-    product: str,
-    initial_cash: float,
-) -> Dict[str, Any]:
-    prices = read_prices_csv(prices_path)
-    trades = read_trades_csv(trades_path)
-    df = replay_to_dataframe(prices, trades, product, trader_cls, initial_cash=initial_cash)
-    summ = replay_summary(df, initial_cash)
-    return summ
 
 
 def main() -> None:
@@ -176,7 +101,7 @@ def main() -> None:
         round_name = args.round
         data_round_hint = "data round from --round (same .py can use --round ROUND1 vs ROUND2)"
     else:
-        inferred = _infer_round_from_trader_path(trader_path)
+        inferred = infer_round_from_trader_path(trader_path)
         if inferred:
             round_name = inferred
             data_round_hint = (
@@ -191,9 +116,9 @@ def main() -> None:
     if not round_dir.is_dir():
         raise SystemExit(f"Data directory not found: {round_dir}")
 
-    trader_cls = _load_trader(trader_path.resolve())
-    days = _discover_days(round_dir)
-    products = _discover_products_union(days)
+    trader_cls = load_trader(trader_path.resolve())
+    days = discover_days(round_dir)
+    products = discover_products_union(days)
     if not products:
         raise SystemExit(f"No products found under {round_dir}")
 
@@ -203,7 +128,7 @@ def main() -> None:
     for day_key, p_csv, t_csv in days:
         day_pnls: Dict[str, float] = {}
         for sym in products:
-            pnl = _pnl_for_day(trader_cls, p_csv, t_csv, sym, args.cash)["pnl"]
+            pnl = pnl_for_day(trader_cls, p_csv, t_csv, sym, args.cash)["pnl"]
             day_pnls[sym] = float(pnl)
             totals[sym] += float(pnl)
         combined = sum(day_pnls.values())

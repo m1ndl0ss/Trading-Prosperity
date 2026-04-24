@@ -16,13 +16,13 @@ ASH_COATED_OSMIUM = "ASH_COATED_OSMIUM"
 _TD_KEY = "mm_mid_prev"
 
 PARAMS: Dict[str, Any] = {
-    "take_width": 1.8,
-    "reversion_beta": -0.10,
-    "adverse_volume": 12,
-    "default_edge": 1,
-    "join_edge": 2,
+    "take_width": 1.7585463365427392,
+    "reversion_beta": -0.17248819702169163,
+    "adverse_volume": 19,
+    "default_edge": 0,
+    "join_edge": 3,
     "clear_width": 1,
-    "prevent_adverse": False,
+    "prevent_adverse": True,
     "disregard_edge": 1,
 }
 

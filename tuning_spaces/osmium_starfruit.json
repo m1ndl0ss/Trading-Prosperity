@@ -1,0 +1,10 @@
+{
+  "take_width": { "type": "float", "low": 1.0, "high": 3.5 },
+  "reversion_beta": { "type": "float", "low": -0.35, "high": 0.05 },
+  "adverse_volume": { "type": "int", "low": 5, "high": 30 },
+  "default_edge": { "type": "int", "low": 0, "high": 4 },
+  "join_edge": { "type": "int", "low": 0, "high": 4 },
+  "clear_width": { "type": "int", "low": 0, "high": 4 },
+  "disregard_edge": { "type": "int", "low": 0, "high": 4 },
+  "prevent_adverse": { "type": "categorical", "choices": [false, true] }
+}
