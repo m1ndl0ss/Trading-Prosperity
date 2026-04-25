@@ -100,14 +100,12 @@ _VEV_CFG: Dict[int, Dict] = {
     5300: {"buy":   45.0, "sell":   53.5},   # teammate calibration — 5,069/day
     5400: {"buy":   15.0, "sell":   18.0},   # teammate calibration — 1,279/day
 }
-_VEV_MM_ONLY = (4000, 5500)  # MM-only: 4000 (spread too wide), 5500 (range too tight)
+_VEV_MM_ONLY = (4000, 5500, 6000, 6500)  # MM-only: spread too wide or range too tight for directional
 
 _ALL_SYMBOLS: Tuple[str, ...] = (
     HYDROGEL,
     VELVET,
     *(f"VEV_{k}" for k in list(_VEV_CFG) + list(_VEV_MM_ONLY)),
-    "VEV_6000",
-    "VEV_6500",
 )
 
 
