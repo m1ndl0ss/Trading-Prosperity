@@ -181,6 +181,30 @@ def _trades_for_product(trades_path: str, product: str) -> pd.DataFrame:
     return t
 
 
+def _sharpe_from_equity_rets(df: pd.DataFrame) -> float | None:
+    """
+    mean / stdev of per-tick simple returns on the replay equity series.
+
+    Simulation CSV timestamps are not wall-clock time, so this is *not* annualized;
+    it is a conventional Sharpe-type ratio (mean return / return volatility) on
+    the tick %Δ of equity, comparable across products on the same run.
+    """
+    if df is None or len(df) < 3 or "equity" not in df.columns:
+        return None
+    eq = df["equity"].astype(float)
+    r = eq.pct_change()
+    r = r.replace([np.inf, -np.inf], np.nan).dropna()
+    if len(r) < 2:
+        return None
+    std = float(r.std())
+    if std < 1e-18 or np.isnan(std):
+        return None
+    mu = float(r.mean())
+    if np.isnan(mu):
+        return None
+    return mu / std
+
+
 def _apply_time_window(df: pd.DataFrame, t_min: int | None, t_max: int | None) -> pd.DataFrame:
     if df.empty:
         return df
@@ -861,6 +885,8 @@ def _render_product_block(
     subdir: str | None = None,
     show_product_heading: bool = True,
     show_pnl_metrics: bool = True,
+    show_rsi: bool = True,
+    show_volume: bool = True,
     show_book_depth: bool = True,
 ) -> None:
     df, summ = _compute_frame(
@@ -909,6 +935,8 @@ def _render_product_block(
                 )
                 st.plotly_chart(fig_px, use_container_width=True, config=_PLOTLY_CHART_CONFIG)
             elif chart_key == "rsi":
+                if not show_rsi:
+                    continue
                 fig_rsi = _build_rsi_figure(
                     df,
                     rsi_period,
@@ -916,6 +944,8 @@ def _render_product_block(
                 )
                 st.plotly_chart(fig_rsi, use_container_width=True, config=_PLOTLY_CHART_CONFIG)
             elif chart_key == "volume":
+                if not show_volume:
+                    continue
                 fig_vol = _build_volume_figure(
                     df,
                     has_strategy=has_strategy,
@@ -945,14 +975,17 @@ def _render_product_block(
                 st.plotly_chart(fig_pe, use_container_width=True, config=_PLOTLY_CHART_CONFIG)
 
         if summ_windowed and show_pnl_metrics:
-            cols = st.columns(4)
+            cols = st.columns(5)
             cols[0].metric("Ending position", f"{summ_windowed['ending_pos']}")
             cols[1].metric("Cash", f"{summ_windowed['cash']:.2f}")
             cols[2].metric("Equity (approx)", f"{summ_windowed['equity']:.2f}")
             cols[3].metric("PnL vs start", f"{summ_windowed['pnl']:+,.2f}")
+            sh = _sharpe_from_equity_rets(df)
+            cols[4].metric("Sharpe (tick)", f"{sh:.3f}" if sh is not None else "—")
             st.caption(
                 f"Buy volume filled (sim): {summ_windowed['buy_fills']} · "
-                f"Sell volume filled (sim): {summ_windowed['sell_fills']}"
+                f"Sell volume filled (sim): {summ_windowed['sell_fills']} · "
+                "Sharpe: mean / stdev of per-tick equity %Δ (not annualized; sim time)."
             )
         elif strategy_id:
             st.info(f"No replay overlay for **{product}** (strategy does not trade this product).")
@@ -1036,8 +1069,23 @@ def main() -> None:
         ema_period = int(
             st.number_input("EMA period (on mid, chart overlay)", min_value=2, max_value=200, value=20, step=1)
         )
+        st.caption("Full replay tab — RSI and volume panels are off by default; turn on below.")
+        show_rsi = st.checkbox("Show RSI chart", value=False, help="Full replay tab: Wilder RSI on mid price.")
         rsi_period = int(
-            st.number_input("RSI period (Wilder, on mid)", min_value=2, max_value=99, value=14, step=1)
+            st.number_input(
+                "RSI period (Wilder, on mid)",
+                min_value=2,
+                max_value=99,
+                value=14,
+                step=1,
+                disabled=not show_rsi,
+            )
+        )
+        show_volume = st.checkbox("Show volume chart", value=False, help="Full replay: L1 book and quoted size volumes (separate from price chart).")
+        show_book_depth = st.checkbox(
+            "Show order book depth (L1–L3 prices & volumes)",
+            value=True,
+            help="Uses bid/ask_price_{1,2,3} and volumes from the prices CSV.",
         )
         show_bb = st.checkbox(
             "Bollinger bands (on mid, price chart)",
@@ -1064,11 +1112,6 @@ def main() -> None:
                 disabled=not show_bb,
                 help="Distance of upper/lower band from the basis in standard deviations.",
             )
-        )
-        show_book_depth = st.checkbox(
-            "Show order book depth (L1–L3 prices & volumes)",
-            value=True,
-            help="Uses bid/ask_price_{1,2,3} and volumes from the prices CSV.",
         )
 
         st.subheader("Chart layout")
@@ -1172,7 +1215,7 @@ def main() -> None:
 
     # Multi-product strategy: PnL per symbol (same time window as charts) + total
     if strategy_id and len(prod_list) > 1:
-        pnl_cells: list[tuple[str, float]] = []
+        pnl_cells: list[tuple[str, float, float | None]] = []
         for prod in prod_list:
             df_i, summ0 = _compute_frame(
                 prices_path,
@@ -1191,15 +1234,23 @@ def main() -> None:
             if df_w.empty:
                 continue
             s = replay_summary(df_w, initial_cash)
-            pnl_cells.append((prod, float(s["pnl"])))
+            sh = _sharpe_from_equity_rets(df_w)
+            pnl_cells.append((prod, float(s["pnl"]), sh))
         if pnl_cells:
             st.markdown("**Simulated PnL** (per product · same window as charts)")
             cols = st.columns(len(pnl_cells) + 1)
             total = 0.0
-            for i, (sym, pnl) in enumerate(pnl_cells):
-                cols[i].metric(sym, f"{pnl:+,.2f}")
+            for i, (sym, pnl, sh) in enumerate(pnl_cells):
+                cols[i].metric(
+                    sym,
+                    f"{pnl:+,.2f}",
+                    delta=(f"Sharpe {sh:.2f}" if sh is not None else None),
+                )
                 total += pnl
             cols[-1].metric("Total", f"{total:+,.2f}")
+            st.caption(
+                "Sharpe: mean / stdev of per-tick equity %Δ (not annualized; sim time)."
+            )
             st.divider()
 
     chart_order = _normalize_chart_order(
@@ -1222,6 +1273,8 @@ def main() -> None:
         algo_fp=algo_fp,
         subdir=algo_subdir,
         show_product_heading=len(prod_list) == 1,
+        show_rsi=show_rsi,
+        show_volume=show_volume,
         show_book_depth=show_book_depth,
     )
 
