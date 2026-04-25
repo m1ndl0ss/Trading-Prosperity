@@ -12,7 +12,7 @@ FILES = [
     'prices_round_3_day_1.csv',
     'prices_round_3_day_2.csv'
 ]
-STRIKES = [4000, 4500, 5000, 5100, 5200, 5300, 5400, 5500, 6000, 6500]
+STRIKES = [ 5000, 5100, 5200, 5300, 5400, 5500, 6000, 6500]
 
 # TTE Logic: Day 0 (5 days), Day 1 (4 days), Day 2 (3 days)
 START_TTE_MAP = {0: 5.0, 1: 4.0, 2: 3.0}
