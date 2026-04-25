@@ -144,9 +144,11 @@ class Trader:
                 # Price rich — aggressively sweep bids.
                 orders = _sweep_sell(depth, pos, best_bid - 4)
 
-            else:
-                # Neutral zone: passive quotes inside the spread.
-                # Skew toward flat: long → lean sells; short → lean buys.
+            elif abs(pos) < mm_size * 4:
+                # Neutral zone, passive MM — but ONLY when position is roughly flat.
+                # Skipping when |pos| is large prevents the MM from fighting profitable
+                # directional positions (on the 7.1k run it cost -5,224 by buying while
+                # short and selling while long, diluting the big directional trades).
                 buy_px  = best_bid + 1
                 sell_px = best_ask - 1
                 if pos > 50:
@@ -156,12 +158,11 @@ class Trader:
                     buy_px  += 1
                     sell_px += 1
 
-                # Clamp to stay inside the book (handles normal cases).
+                # Clamp to stay inside the book.
                 buy_px  = min(buy_px,  best_ask - 1)
                 sell_px = max(sell_px, best_bid + 1)
 
-                # Spread-crossing guard: VELVETFRUIT spread can collapse to 1–3
-                # units; never post if quotes would cross or touch.
+                # Spread-crossing guard: spread can collapse to 1–3 units.
                 if buy_px < sell_px:
                     bq = min(mm_size, LIMIT - pos)
                     sq = min(mm_size, LIMIT + pos)
