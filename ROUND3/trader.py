@@ -90,7 +90,10 @@ _VEV_CFG: Dict[int, Dict] = {
     # 4000: REMOVED from directional — bid-ask spread (~21 pts) > band width (19 pts)
     #   Round-trip: sell at bid(1261) - buy at ask(1263) = -2 pts/unit → LOSS every cycle
     #   Moved to MM-only so we earn the spread passively instead.
-    4500: {"buy":  752.0, "sell":  771.0},   # spread ~16 pts < band 19 pts → +3 pts/unit ✓
+    4500: {"buy":  749.0, "sell":  773.0},   # IMPROVED: band=24pts, spread~16pts → +8pts/unit ✓
+    # Previous (752/771): 86/93 fires, +3pts/unit, ~2,704/day
+    # New     (749/773): 39/44 fires, +8pts/unit, ~4,800/day est (+2,096 gain)
+    # Fewer cycles but 2.7× higher edge per unit → better total at these firing rates
     5000: {"buy":  246.5, "sell":  274.2},   # teammate calibration — 5,335/day
     5100: {"buy":  158.6, "sell":  184.9},   # teammate calibration — 8,143/day ← best
     5200: {"buy":   89.3, "sell":  109.7},   # teammate calibration — 5,598/day
