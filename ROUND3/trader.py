@@ -24,16 +24,22 @@ Pure per-strike price-band mean-reversion:
   • MM fires BOTH sides (lean toward flat when |pos| > 75)
 
 === IMPROVEMENTS OVER TEAMMATE'S CODE ===
-1. VEV_4000: buy@1252 sell@1271  (teammate had buy=1227.4 → never fired, +876 gain)
-2. VEV_4500: buy@752  sell@771   (teammate had buy=727.9  → never fired, +3,362 gain)
-Both calibrated to p10/p90 of observed mid-price distribution.
+1. VEV_4500: buy@752  sell@771  — teammate had buy=727.9 (never fired) → now +2,704/day
+2. VEV_4000: MM-only  — directional bands LOST -1,525 (spread 21pts > band 19pts)
+   Passive MM earns the spread instead of paying it → expect ~+117 like teammate
+
+Key rule discovered: directional sweep only profitable when bid-ask spread < band width.
+  VEV_4000 spread 21 pts > band 19 pts → round-trip = -2 pts/unit → MM-only
+  VEV_4500 spread 16 pts < band 19 pts → round-trip = +3 pts/unit → directional ✓
+  VEV_5000-5400: spreads 5-7 pts << bands 8-28 pts → directional very profitable ✓
 
 === EXPECTED PERFORMANCE ===
   HYDROGEL_PACK       :  ~19,600/day  (unchanged — proven)
   VELVETFRUIT_EXTRACT :   ~9,500/day  (unchanged — proven)
-  VEV_5000–5400       :  ~25,000/day  (same as teammate's bands)
-  VEV_4000/4500       :   ~4,500/day  (improved from ~200 → ~4,500)
-  TOTAL               :  ~58,600/day  (+3,900 vs teammate's 54,749)
+  VEV_5000–5400       :  ~25,000/day  (same as teammate's proven bands)
+  VEV_4500 directional:   ~2,700/day  (improved from teammate's +99 MM-only)
+  VEV_4000 MM-only    :     ~117/day  (back to teammate's baseline, no longer losing)
+  TOTAL               :  ~56,917/day  (+2,168 vs teammate's 54,749)
 
 === DTE (DAYS TO EXPIRATION) NOTE ===
 OptionalAlpha research: with short DTE (our 7-day round), the key is:
@@ -81,15 +87,17 @@ _VEV_MM    = 15
 # 5000-5400: Teammate's working calibration — generating 25k/day combined.
 # 5500: MM-only (range 3pts, spread too wide for profitable directional sweep).
 _VEV_CFG: Dict[int, Dict] = {
-    4000: {"buy": 1252.0, "sell": 1271.0},   # FIXED: was 1227.4/1276.3 (buy never fired)
-    4500: {"buy":  752.0, "sell":  771.0},   # FIXED: was 727.9/776.8  (buy never fired)
+    # 4000: REMOVED from directional — bid-ask spread (~21 pts) > band width (19 pts)
+    #   Round-trip: sell at bid(1261) - buy at ask(1263) = -2 pts/unit → LOSS every cycle
+    #   Moved to MM-only so we earn the spread passively instead.
+    4500: {"buy":  752.0, "sell":  771.0},   # spread ~16 pts < band 19 pts → +3 pts/unit ✓
     5000: {"buy":  246.5, "sell":  274.2},   # teammate calibration — 5,335/day
     5100: {"buy":  158.6, "sell":  184.9},   # teammate calibration — 8,143/day ← best
     5200: {"buy":   89.3, "sell":  109.7},   # teammate calibration — 5,598/day
     5300: {"buy":   45.0, "sell":   53.5},   # teammate calibration — 5,069/day
     5400: {"buy":   15.0, "sell":   18.0},   # teammate calibration — 1,279/day
 }
-_VEV_MM_ONLY = (5500,)   # passive MM only; directional sweep not viable
+_VEV_MM_ONLY = (4000, 5500)  # MM-only: 4000 (spread too wide), 5500 (range too tight)
 
 _ALL_SYMBOLS: Tuple[str, ...] = (
     HYDROGEL,
