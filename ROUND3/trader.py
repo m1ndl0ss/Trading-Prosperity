@@ -6,28 +6,33 @@ import json
 
 _N = NormalDist()
 
-# ── Volatility smile parabola (corrected: K=4000/4500 excluded from fit) ──
+# ── Volatility smile parabola (K=4000/4500 excluded from fit) ──
 A, B, C = 7.867122, -15.462142, 7.922102
 
-# ── Active strikes with per-strike mean bias and edge threshold ──
-# Only trade strikes with tight std (reliable signal)
-# Mean bias = typical (market - fair); edge = min deviation to trade
+# ── Per-strike config ──
+# adj_fair = bs_fair + mean_bias  (the "expected" market execution price)
+# Only K=5100 and K=5500 are kept:
+#   K=5000 → REMOVED: avg spread 6.2 credits, execution edge always negative
+#   K=5100 → day 2 sells have +0.14 avg edge at execution (36% positive ticks)
+#   K=5500 → day 0 buys +2.15 (88%), day 2 sells +2.03 (99%) — the key product
 STRIKE_PARAMS = {
-    5000: {'mean_bias': -0.37, 'edge': 1.8},
-    5100: {'mean_bias':  0.08, 'edge': 2.2},
-    5500: {'mean_bias': -1.67, 'edge': 2.8},
+    5100: {'mean_bias':  0.08, 'pos_limit': 60},
+    5500: {'mean_bias': -1.67, 'pos_limit': 150},
 }
 
-# ── Safety filters ──
-MIN_VOUCHER_MID  = 5.0   # skip near-worthless deep OTM options
-MAX_TRADE_QTY    = 10    # units per order (scale up once confident)
-VEV_LIMIT        = 200
-VEV_EMA_SPAN     = 50    # slow EMA → filters tick noise
-VEV_EDGE         = 4.0   # ~3 std from EMA before trading
-VEV_QTY          = 8
+# ── Minimum edge at execution price vs adj_fair to actually trade ──
+# Advisor: "volume should reflect strength of conviction" → scale with edge
+MIN_EDGE = 0.5        # credits — below this, skip entirely
+MIN_VOUCHER_MID = 3.0 # skip near-worthless OTM options
+
+# ── VELVETFRUIT_EXTRACT mean reversion ──
+VEV_LIMIT    = 200
+VEV_EMA_SPAN = 50
+VEV_EDGE     = 4.0
+VEV_QTY      = 8
 
 
-# ── Math helpers ──────────────────────────────────────────────────────────────
+# ── Math ─────────────────────────────────────────────────────────────────────
 
 def bs_call(S: float, K: float, T: float, sigma: float) -> float:
     if T <= 0 or sigma <= 0 or S <= 0:
@@ -42,22 +47,18 @@ def smile_sigma(S: float, K: int) -> float:
     return max(A * m ** 2 + B * m + C, 0.01)
 
 
-def fair_price(S: float, K: int, T: float) -> float:
-    return bs_call(S, K, T, smile_sigma(S, K))
+def fair_price(S: float, K: int, T_years: float) -> float:
+    return bs_call(S, K, T_years, smile_sigma(S, K))
 
 
 def calibrate_tte(S: float, order_depths: dict) -> Optional[float]:
-    """
-    Back-solve TTE (in days) from near-ATM option market price.
-    Uses bisection: find T such that bs_call(S, K, T, sigma) == market_mid.
-    Falls back through strikes until one works.
-    """
+    """Back-solve TTE from near-ATM option market price via bisection."""
     for K in [5100, 5000, 5200, 5300]:
         depth = order_depths.get(f'VEV_{K}')
         if depth is None or not depth.buy_orders or not depth.sell_orders:
             continue
         mid = (max(depth.buy_orders) + min(depth.sell_orders)) / 2.0
-        if mid < 10:   # need enough time value to be a useful anchor
+        if mid < 10:
             continue
         sigma = smile_sigma(S, K)
         lo, hi = 0.3 / 365.0, 10.0 / 365.0
@@ -68,10 +69,26 @@ def calibrate_tte(S: float, order_depths: dict) -> Optional[float]:
             else:
                 lo = t_mid
         tte_days = t_mid * 365.0
-        # Sanity check: should be between 1 and 8 days
         if 0.5 <= tte_days <= 8.5:
-            return round(tte_days * 2) / 2.0   # round to nearest 0.5 day
+            return round(tte_days * 2) / 2.0
     return None
+
+
+def qty_from_edge(edge: float) -> int:
+    """
+    Advisor: scale volume proportionally to conviction (deviation magnitude).
+    Larger edge = stronger signal = more units.
+    """
+    if edge < MIN_EDGE:
+        return 0
+    elif edge < 1.5:
+        return 3
+    elif edge < 3.0:
+        return 7
+    elif edge < 5.0:
+        return 12
+    else:
+        return 18
 
 
 def get_mid(depth: OrderDepth) -> Optional[float]:
@@ -85,11 +102,11 @@ def get_mid(depth: OrderDepth) -> Optional[float]:
 class Trader:
 
     def run(self, state: TradingState):
-        # ── 1. Load persisted state ──────────────────────────────────────────
-        ema_vev       = None
-        tte_start     = None   # TTE in days at timestamp=0 of current day
-        prev_ts       = -1
-        day_count     = 0
+        # ── 1. Restore persisted state ───────────────────────────────────────
+        ema_vev   = None
+        tte_start = None
+        prev_ts   = -1
+        day_count = 0
 
         if state.traderData:
             try:
@@ -101,10 +118,11 @@ class Trader:
             except Exception:
                 pass
 
-        # ── 2. Detect day rollover (timestamp resets to 0 between days) ─────
+        # ── 2. Detect day rollover ───────────────────────────────────────────
         if prev_ts > 0 and state.timestamp < prev_ts:
-            day_count  += 1
-            tte_start  -= 1.0   # one full day consumed
+            day_count += 1
+            if tte_start is not None:
+                tte_start -= 1.0
         prev_ts = state.timestamp
 
         # ── 3. Get underlying price ──────────────────────────────────────────
@@ -112,74 +130,76 @@ class Trader:
         S = get_mid(vev_depth) if vev_depth else None
         if S is None:
             return {}, 0, json.dumps({'ema_vev': ema_vev, 'tte_start': tte_start,
-                                       'prev_ts': prev_ts, 'day_count': day_count})
+                                      'prev_ts': prev_ts, 'day_count': day_count})
 
-        # ── 4. Calibrate TTE on first tick (robust to backtester starting mid-run) ──
+        # ── 4. Calibrate TTE on first tick ───────────────────────────────────
         if tte_start is None:
             tte_start = calibrate_tte(S, state.order_depths)
             if tte_start is None:
-                tte_start = 5.0   # safe default (overestimates, but better than crashing)
+                tte_start = 5.0
 
-        # Current time to expiry in years
         T_years = max((tte_start - state.timestamp / 1_000_000.0) / 365.0, 1e-6)
 
-        # ── 5. Update EMA on underlying ─────────────────────────────────────
+        # ── 5. Update EMA ────────────────────────────────────────────────────
         alpha = 2.0 / (VEV_EMA_SPAN + 1)
         ema_vev = S if ema_vev is None else alpha * S + (1 - alpha) * ema_vev
 
         result: Dict[str, List[Order]] = {}
 
-        # ── 6. IV Scalping across active strikes ─────────────────────────────
+        # ── 6. IV Scalping — compare EXECUTION PRICE vs adj_fair ─────────────
+        # Advisor: buy underpriced vol, sell overpriced vol.
+        # Critical fix: we execute at bid (sells) or ask (buys), NOT at mid.
+        # Only trade when the actual execution price beats the adjusted fair value.
         for K, params in STRIKE_PARAMS.items():
             symbol = f'VEV_{K}'
             depth  = state.order_depths.get(symbol)
-            if depth is None:
+            if depth is None or not depth.buy_orders or not depth.sell_orders:
                 continue
 
             mid = get_mid(depth)
             if mid is None or mid < MIN_VOUCHER_MID:
-                continue   # skip near-worthless / illiquid options
+                continue
 
             fp       = fair_price(S, K, T_years)
-            centered = (mid - fp) - params['mean_bias']
-            edge     = params['edge']
+            adj_fair = fp + params['mean_bias']
             pos      = state.position.get(symbol, 0)
+            limit    = params['pos_limit']
+            bid      = max(depth.buy_orders)
+            ask      = min(depth.sell_orders)
             orders   = []
 
-            if centered > edge and pos > -300:
-                # Overpriced → sell at best bid
-                bid = max(depth.buy_orders) if depth.buy_orders else None
-                if bid is not None:
-                    qty = min(MAX_TRADE_QTY, 300 + pos)
-                    if qty > 0:
-                        orders.append(Order(symbol, bid, -qty))
+            # SELL: bid must be above adj_fair (we execute above fair value)
+            sell_edge = bid - adj_fair
+            if sell_edge >= MIN_EDGE and pos > -limit:
+                qty = min(qty_from_edge(sell_edge), limit + pos)
+                if qty > 0:
+                    orders.append(Order(symbol, bid, -qty))
 
-            elif centered < -edge and pos < 300:
-                # Underpriced → buy at best ask
-                ask = min(depth.sell_orders) if depth.sell_orders else None
-                if ask is not None:
-                    qty = min(MAX_TRADE_QTY, 300 - pos)
-                    if qty > 0:
-                        orders.append(Order(symbol, ask, qty))
+            # BUY: ask must be below adj_fair (we execute below fair value)
+            buy_edge = adj_fair - ask
+            if buy_edge >= MIN_EDGE and pos < limit:
+                qty = min(qty_from_edge(buy_edge), limit - pos)
+                if qty > 0:
+                    orders.append(Order(symbol, ask, qty))
 
             if orders:
                 result[symbol] = orders
 
-        # ── 7. Mean reversion on VELVETFRUIT_EXTRACT ────────────────────────
-        ema_dev  = S - ema_vev
-        vev_pos  = state.position.get('VELVETFRUIT_EXTRACT', 0)
+        # ── 7. VELVETFRUIT_EXTRACT mean reversion ────────────────────────────
+        ema_dev    = S - ema_vev
+        vev_pos    = state.position.get('VELVETFRUIT_EXTRACT', 0)
         vev_orders = []
 
         if ema_dev > VEV_EDGE and vev_pos > -VEV_LIMIT:
             bid = max(vev_depth.buy_orders) if vev_depth.buy_orders else None
-            if bid is not None:
+            if bid:
                 qty = min(VEV_QTY, VEV_LIMIT + vev_pos)
                 if qty > 0:
                     vev_orders.append(Order('VELVETFRUIT_EXTRACT', bid, -qty))
 
         elif ema_dev < -VEV_EDGE and vev_pos < VEV_LIMIT:
             ask = min(vev_depth.sell_orders) if vev_depth.sell_orders else None
-            if ask is not None:
+            if ask:
                 qty = min(VEV_QTY, VEV_LIMIT - vev_pos)
                 if qty > 0:
                     vev_orders.append(Order('VELVETFRUIT_EXTRACT', ask, qty))
@@ -188,11 +208,7 @@ class Trader:
             result['VELVETFRUIT_EXTRACT'] = vev_orders
 
         # ── 8. Persist state ─────────────────────────────────────────────────
-        trader_data = json.dumps({
-            'ema_vev':   ema_vev,
-            'tte_start': tte_start,
-            'prev_ts':   prev_ts,
-            'day_count': day_count,
+        return result, 0, json.dumps({
+            'ema_vev': ema_vev, 'tte_start': tte_start,
+            'prev_ts': prev_ts, 'day_count': day_count,
         })
-
-        return result, 0, trader_data
