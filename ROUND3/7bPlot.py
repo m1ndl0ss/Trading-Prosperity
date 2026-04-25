@@ -13,7 +13,7 @@ FILES = [
     'prices_round_3_day_1.csv',
     'prices_round_3_day_2.csv'
 ]
-TARGET_VOUCHER = 'VEV_5000'
+TARGET_VOUCHER = 'VEV_5300'
 STRIKE = 5000
 START_TTE_MAP = {0: 5.0, 1: 4.0, 2: 3.0}
 
