@@ -1,198 +1,270 @@
-from math import log, sqrt
-from statistics import NormalDist
-from datamodel import OrderDepth, TradingState, Order
-from typing import List, Dict, Optional
+"""
+Round 3 combined trader: HYDROGEL_PACK + VELVETFRUIT_EXTRACT + VEV options
+
+=== DIAGNOSIS FROM LOG 406865 ===
+The IV z-score layer (added in previous iteration) caused a -14,751 regression:
+  VEV_5000: teammate=5,335 → ours=40    (-5,295)
+  VEV_5100: teammate=8,143 → ours=2,021 (-6,122)
+  VEV_5200: teammate=5,598 → ours=1,004 (-4,593)
+
+Root cause: IV z-score fires 10-unit trades in the neutral zone (90%+ of ticks),
+creating ~4× more total trades vs the clean mean-reversion approach.
+Each extra neutral-zone trade crosses the bid-ask spread (~6 pts on VEV_5000),
+generating ~6 pts of friction per round-trip. With ~1,100 extra units traded on
+VEV_5000 alone, that's ~6,600 in friction — matching the observed regression.
+
+LESSON: fewer, more precise trades > more frequent, smaller trades.
+IV z-score signals did not provide edge sufficient to cover their friction cost.
+
+=== WHAT ACTUALLY WORKS (from teammate 405673 analysis) ===
+Pure per-strike price-band mean-reversion:
+  • BUY aggressively (ask+4) when mid < buy_t
+  • SELL aggressively (bid-4) when mid > sell_t
+  • Passive MM only in neutral zone when spread ≥ 3 (prevents crossing 1-2pt spreads)
+  • MM fires BOTH sides (lean toward flat when |pos| > 75)
+
+=== IMPROVEMENTS OVER TEAMMATE'S CODE ===
+1. VEV_4500: buy@752  sell@771  — teammate had buy=727.9 (never fired) → now +2,704/day
+2. VEV_4000: MM-only  — directional bands LOST -1,525 (spread 21pts > band 19pts)
+   Passive MM earns the spread instead of paying it → expect ~+117 like teammate
+
+Key rule discovered: directional sweep only profitable when bid-ask spread < band width.
+  VEV_4000 spread 21 pts > band 19 pts → round-trip = -2 pts/unit → MM-only
+  VEV_4500 spread 16 pts < band 19 pts → round-trip = +3 pts/unit → directional ✓
+  VEV_5000-5400: spreads 5-7 pts << bands 8-28 pts → directional very profitable ✓
+
+=== EXPECTED PERFORMANCE ===
+  HYDROGEL_PACK       :  ~19,600/day  (unchanged — proven)
+  VELVETFRUIT_EXTRACT :   ~9,500/day  (unchanged — proven)
+  VEV_5000–5400       :  ~25,000/day  (same as teammate's proven bands)
+  VEV_4500 directional:   ~2,700/day  (improved from teammate's +99 MM-only)
+  VEV_4000 MM-only    :     ~117/day  (back to teammate's baseline, no longer losing)
+  TOTAL               :  ~56,917/day  (+2,168 vs teammate's 54,749)
+
+=== DTE (DAYS TO EXPIRATION) NOTE ===
+OptionalAlpha research: with short DTE (our 7-day round), the key is:
+  • Focus on strikes near ATM (VEV_5100/5200): highest time value per unit of risk
+  • Passive MM earns best when spread ≥ 3 (requires discipline — skip tight spreads)
+  • Don't over-trade: let the mean-reversion bands do the heavy lifting
+This is already reflected in our spread≥3 guard and neutral-zone MM only approach.
+"""
+
+from __future__ import annotations
+
 import json
+from typing import Any, Dict, List, Optional, Tuple
 
-_N = NormalDist()
+from datamodel import Order, OrderDepth, TradingState
 
-# ── Volatility smile parabola (corrected: K=4000/4500 excluded from fit) ──
-A, B, C = 7.867122, -15.462142, 7.922102
+# ─────────────────────────────────────────────────────────────────────────────
+# HYDROGEL_PACK
+# ─────────────────────────────────────────────────────────────────────────────
+HYDROGEL     = "HYDROGEL_PACK"
+HYDRO_LIMIT  = 200
+HYDRO_BUY    = 9940
+HYDRO_SELL   = 10025
+HYDRO_UNWIND = 9980
+HYDRO_MM     = 15
 
-# ── Active strikes with per-strike mean bias and edge threshold ──
-# Only trade strikes with tight std (reliable signal)
-# Mean bias = typical (market - fair); edge = min deviation to trade
-STRIKE_PARAMS = {
-    5000: {'mean_bias': -0.37, 'edge': 1.8},
-    5100: {'mean_bias':  0.08, 'edge': 2.2},
-    5500: {'mean_bias': -1.67, 'edge': 2.8},
+# ─────────────────────────────────────────────────────────────────────────────
+# VELVETFRUIT_EXTRACT
+# ─────────────────────────────────────────────────────────────────────────────
+VELVET        = "VELVETFRUIT_EXTRACT"
+VELVET_LIMIT  = 200
+VELVET_BUY    = 5244
+VELVET_SELL   = 5274
+VELVET_MM     = 25
+VELVET_MM_CUT = 100    # suppress passive MM when |pos| >= this
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VEV options — per-strike mean-reversion
+# ─────────────────────────────────────────────────────────────────────────────
+_VEV_LIMIT = 300
+_VEV_MM    = 15
+
+# Bands calibrated to observed mid-price p10/p90 distributions.
+# 4000/4500: FIXED vs teammate (old buy thresholds were below observed minimum).
+# 5000-5400: Teammate's working calibration — generating 25k/day combined.
+# 5500: MM-only (range 3pts, spread too wide for profitable directional sweep).
+_VEV_CFG: Dict[int, Dict] = {
+    # 4000: REMOVED from directional — bid-ask spread (~21 pts) > band width (19 pts)
+    #   Round-trip: sell at bid(1261) - buy at ask(1263) = -2 pts/unit → LOSS every cycle
+    #   Moved to MM-only so we earn the spread passively instead.
+    4500: {"buy":  749.0, "sell":  773.0},   # IMPROVED: band=24pts, spread~16pts → +8pts/unit ✓
+    # Previous (752/771): 86/93 fires, +3pts/unit, ~2,704/day
+    # New     (749/773): 39/44 fires, +8pts/unit, ~4,800/day est (+2,096 gain)
+    # Fewer cycles but 2.7× higher edge per unit → better total at these firing rates
+    5000: {"buy":  246.5, "sell":  274.2},   # teammate calibration — 5,335/day
+    5100: {"buy":  158.6, "sell":  184.9},   # teammate calibration — 8,143/day ← best
+    5200: {"buy":   89.3, "sell":  109.7},   # teammate calibration — 5,598/day
+    5300: {"buy":   45.0, "sell":   53.5},   # teammate calibration — 5,069/day
+    5400: {"buy":   15.0, "sell":   18.0},   # teammate calibration — 1,279/day
 }
+_VEV_MM_ONLY = (4000, 5500, 6000, 6500)  # MM-only: spread too wide or range too tight for directional
 
-# ── Safety filters ──
-MIN_VOUCHER_MID  = 5.0   # skip near-worthless deep OTM options
-MAX_TRADE_QTY    = 10    # units per order (scale up once confident)
-VEV_LIMIT        = 200
-VEV_EMA_SPAN     = 50    # slow EMA → filters tick noise
-VEV_EDGE         = 4.0   # ~3 std from EMA before trading
-VEV_QTY          = 8
-
-
-# ── Math helpers ──────────────────────────────────────────────────────────────
-
-def bs_call(S: float, K: float, T: float, sigma: float) -> float:
-    if T <= 0 or sigma <= 0 or S <= 0:
-        return max(0.0, S - K)
-    d1 = (log(S / K) + 0.5 * sigma ** 2 * T) / (sigma * sqrt(T))
-    d2 = d1 - sigma * sqrt(T)
-    return S * _N.cdf(d1) - K * _N.cdf(d2)
+_ALL_SYMBOLS: Tuple[str, ...] = (
+    HYDROGEL,
+    VELVET,
+    *(f"VEV_{k}" for k in list(_VEV_CFG) + list(_VEV_MM_ONLY)),
+)
 
 
-def smile_sigma(S: float, K: int) -> float:
-    m = K / S
-    return max(A * m ** 2 + B * m + C, 0.01)
-
-
-def fair_price(S: float, K: int, T: float) -> float:
-    return bs_call(S, K, T, smile_sigma(S, K))
-
-
-def calibrate_tte(S: float, order_depths: dict) -> Optional[float]:
-    """
-    Back-solve TTE (in days) from near-ATM option market price.
-    Uses bisection: find T such that bs_call(S, K, T, sigma) == market_mid.
-    Falls back through strikes until one works.
-    """
-    for K in [5100, 5000, 5200, 5300]:
-        depth = order_depths.get(f'VEV_{K}')
-        if depth is None or not depth.buy_orders or not depth.sell_orders:
-            continue
-        mid = (max(depth.buy_orders) + min(depth.sell_orders)) / 2.0
-        if mid < 10:   # need enough time value to be a useful anchor
-            continue
-        sigma = smile_sigma(S, K)
-        lo, hi = 0.3 / 365.0, 10.0 / 365.0
-        for _ in range(30):
-            t_mid = (lo + hi) / 2.0
-            if bs_call(S, K, t_mid, sigma) > mid:
-                hi = t_mid
-            else:
-                lo = t_mid
-        tte_days = t_mid * 365.0
-        # Sanity check: should be between 1 and 8 days
-        if 0.5 <= tte_days <= 8.5:
-            return round(tte_days * 2) / 2.0   # round to nearest 0.5 day
-    return None
-
-
-def get_mid(depth: OrderDepth) -> Optional[float]:
+def _mid(depth: OrderDepth) -> Optional[float]:
     if not depth.buy_orders or not depth.sell_orders:
         return None
     return (max(depth.buy_orders) + min(depth.sell_orders)) / 2.0
 
 
-# ── Trader ────────────────────────────────────────────────────────────────────
-
 class Trader:
 
-    def run(self, state: TradingState):
-        # ── 1. Load persisted state ──────────────────────────────────────────
-        ema_vev       = None
-        tte_start     = None   # TTE in days at timestamp=0 of current day
-        prev_ts       = -1
-        day_count     = 0
-
+    def run(self, state: TradingState) -> Tuple[Dict[str, List[Order]], int, str]:
+        td: Dict[str, Any] = {}
         if state.traderData:
             try:
-                d = json.loads(state.traderData)
-                ema_vev   = d.get('ema_vev')
-                tte_start = d.get('tte_start')
-                prev_ts   = d.get('prev_ts', -1)
-                day_count = d.get('day_count', 0)
-            except Exception:
-                pass
+                raw = json.loads(state.traderData)
+                if isinstance(raw, dict):
+                    td = raw
+            except (json.JSONDecodeError, TypeError):
+                td = {}
 
-        # ── 2. Detect day rollover (timestamp resets to 0 between days) ─────
-        if prev_ts > 0 and state.timestamp < prev_ts:
-            day_count  += 1
-            tte_start  -= 1.0   # one full day consumed
-        prev_ts = state.timestamp
+        result: Dict[str, List[Order]] = {sym: [] for sym in _ALL_SYMBOLS}
 
-        # ── 3. Get underlying price ──────────────────────────────────────────
-        vev_depth = state.order_depths.get('VELVETFRUIT_EXTRACT')
-        S = get_mid(vev_depth) if vev_depth else None
-        if S is None:
-            return {}, 0, json.dumps({'ema_vev': ema_vev, 'tte_start': tte_start,
-                                       'prev_ts': prev_ts, 'day_count': day_count})
+        # ── 1. HYDROGEL_PACK ─────────────────────────────────────────────────
+        d = state.order_depths.get(HYDROGEL)
+        if d and d.buy_orders and d.sell_orders:
+            mid = _mid(d)
+            if mid is not None:
+                pos = int(state.position.get(HYDROGEL, 0))
+                bb  = max(d.buy_orders)
+                ba  = min(d.sell_orders)
+                o: List[Order] = []
 
-        # ── 4. Calibrate TTE on first tick (robust to backtester starting mid-run) ──
-        if tte_start is None:
-            tte_start = calibrate_tte(S, state.order_depths)
-            if tte_start is None:
-                tte_start = 5.0   # safe default (overestimates, but better than crashing)
+                if mid > HYDRO_SELL and pos > -HYDRO_LIMIT:
+                    want = HYDRO_LIMIT + pos
+                    if want > 0:
+                        o = [Order(HYDROGEL, bb - 10, -want)]
+                elif mid < HYDRO_BUY and pos < HYDRO_LIMIT:
+                    want = HYDRO_LIMIT - pos
+                    if want > 0:
+                        o = [Order(HYDROGEL, ba + 10, want)]
+                elif mid > HYDRO_UNWIND and pos > 0:
+                    o = [Order(HYDROGEL, bb, -pos)]
+                else:
+                    bp = bb + 1; sp = ba - 1
+                    if pos > 50:  bp -= 1; sp -= 1
+                    elif pos < -50: bp += 1; sp += 1
+                    bp = min(bp, ba - 1); sp = max(sp, bb + 1)
+                    bq = min(HYDRO_MM, HYDRO_LIMIT - pos)
+                    sq = min(HYDRO_MM, HYDRO_LIMIT + pos)
+                    if bq > 0: o.append(Order(HYDROGEL, int(bp),  bq))
+                    if sq > 0: o.append(Order(HYDROGEL, int(sp), -sq))
 
-        # Current time to expiry in years
-        T_years = max((tte_start - state.timestamp / 1_000_000.0) / 365.0, 1e-6)
+                result[HYDROGEL] = o
 
-        # ── 5. Update EMA on underlying ─────────────────────────────────────
-        alpha = 2.0 / (VEV_EMA_SPAN + 1)
-        ema_vev = S if ema_vev is None else alpha * S + (1 - alpha) * ema_vev
+        # ── 2. VELVETFRUIT_EXTRACT ───────────────────────────────────────────
+        d = state.order_depths.get(VELVET)
+        if d and d.buy_orders and d.sell_orders:
+            mid = _mid(d)
+            if mid is not None:
+                pos = int(state.position.get(VELVET, 0))
+                bb  = max(d.buy_orders)
+                ba  = min(d.sell_orders)
+                o   = []
 
-        result: Dict[str, List[Order]] = {}
+                if mid < VELVET_BUY:
+                    want = VELVET_LIMIT - pos
+                    if want > 0:
+                        o = [Order(VELVET, ba + 4, want)]
+                elif mid > VELVET_SELL:
+                    want = VELVET_LIMIT + pos
+                    if want > 0:
+                        o = [Order(VELVET, bb - 4, -want)]
+                elif abs(pos) < VELVET_MM_CUT:
+                    bp = bb + 1; sp = ba - 1
+                    if pos > 50:  bp -= 1; sp -= 1
+                    elif pos < -50: bp += 1; sp += 1
+                    bp = min(bp, ba - 1); sp = max(sp, bb + 1)
+                    if bp < sp:
+                        bq = min(VELVET_MM, VELVET_LIMIT - pos)
+                        sq = min(VELVET_MM, VELVET_LIMIT + pos)
+                        if bq > 0: o.append(Order(VELVET, int(bp),  bq))
+                        if sq > 0: o.append(Order(VELVET, int(sp), -sq))
 
-        # ── 6. IV Scalping across active strikes ─────────────────────────────
-        for K, params in STRIKE_PARAMS.items():
-            symbol = f'VEV_{K}'
-            depth  = state.order_depths.get(symbol)
-            if depth is None:
+                result[VELVET] = o
+
+        # ── 3. VEV options — pure price-band mean-reversion ──────────────────
+        #
+        # ONLY three modes:
+        #   (a) BUY zone  (mid < buy_t)  : sweep buy to +300
+        #   (b) SELL zone (mid > sell_t) : sweep sell to -300
+        #   (c) NEUTRAL   (in between)   : passive MM if spread >= 3, else nothing
+        #
+        # No IV signals. No extra neutral-zone orders. This prevents the bid-ask
+        # friction that killed VEV_5000-5400 in the previous version.
+
+        for K, cfg in _VEV_CFG.items():
+            sym = f"VEV_{K}"
+            d   = state.order_depths.get(sym)
+            if not d or not d.buy_orders or not d.sell_orders:
+                continue
+            mid = _mid(d)
+            if mid is None:
                 continue
 
-            mid = get_mid(depth)
-            if mid is None or mid < MIN_VOUCHER_MID:
-                continue   # skip near-worthless / illiquid options
+            pos    = int(state.position.get(sym, 0))
+            bb     = max(d.buy_orders)
+            ba     = min(d.sell_orders)
+            spread = ba - bb
+            o      = []
 
-            fp       = fair_price(S, K, T_years)
-            centered = (mid - fp) - params['mean_bias']
-            edge     = params['edge']
-            pos      = state.position.get(symbol, 0)
-            orders   = []
+            if mid < cfg["buy"]:
+                # Option cheap → sweep long to position limit
+                want = _VEV_LIMIT - pos
+                if want > 0:
+                    o.append(Order(sym, ba + 4, want))
 
-            if centered > edge and pos > -300:
-                # Overpriced → sell at best bid
-                bid = max(depth.buy_orders) if depth.buy_orders else None
-                if bid is not None:
-                    qty = min(MAX_TRADE_QTY, 300 + pos)
-                    if qty > 0:
-                        orders.append(Order(symbol, bid, -qty))
+            elif mid > cfg["sell"]:
+                # Option expensive → sweep short to position limit
+                want = _VEV_LIMIT + pos
+                if want > 0:
+                    o.append(Order(sym, bb - 4, -want))
 
-            elif centered < -edge and pos < 300:
-                # Underpriced → buy at best ask
-                ask = min(depth.sell_orders) if depth.sell_orders else None
-                if ask is not None:
-                    qty = min(MAX_TRADE_QTY, 300 - pos)
-                    if qty > 0:
-                        orders.append(Order(symbol, ask, qty))
+            elif spread >= 3:
+                # Neutral zone: passive MM only when spread is worth crossing
+                bp = bb + 1; sp = ba - 1
+                if pos > _VEV_LIMIT // 4:    bp -= 1; sp -= 1   # lean sell when long
+                elif pos < -(_VEV_LIMIT // 4): bp += 1; sp += 1  # lean buy when short
+                bp = min(bp, ba - 1); sp = max(sp, bb + 1)
+                if bp < sp:
+                    bq = min(_VEV_MM, _VEV_LIMIT - pos)
+                    sq = min(_VEV_MM, _VEV_LIMIT + pos)
+                    if bq > 0: o.append(Order(sym, int(bp),  bq))
+                    if sq > 0: o.append(Order(sym, int(sp), -sq))
+            # spread < 3 in neutral: do nothing (avoid paying 1-2pt spread for no edge)
 
-            if orders:
-                result[symbol] = orders
+            result[sym] = o
 
-        # ── 7. Mean reversion on VELVETFRUIT_EXTRACT ────────────────────────
-        ema_dev  = S - ema_vev
-        vev_pos  = state.position.get('VELVETFRUIT_EXTRACT', 0)
-        vev_orders = []
+        # ── 4. VEV_5500 — passive MM only (range too tight for sweeps) ────────
+        for K in _VEV_MM_ONLY:
+            sym = f"VEV_{K}"
+            d   = state.order_depths.get(sym)
+            if not d or not d.buy_orders or not d.sell_orders:
+                continue
+            pos    = int(state.position.get(sym, 0))
+            bb     = max(d.buy_orders)
+            ba     = min(d.sell_orders)
+            spread = ba - bb
+            o      = []
+            if spread >= 3:
+                bp = bb + 1; sp = ba - 1
+                if pos > _VEV_LIMIT // 4:    bp -= 1; sp -= 1
+                elif pos < -(_VEV_LIMIT // 4): bp += 1; sp += 1
+                bp = min(bp, ba - 1); sp = max(sp, bb + 1)
+                if bp < sp:
+                    bq = min(_VEV_MM, _VEV_LIMIT - pos)
+                    sq = min(_VEV_MM, _VEV_LIMIT + pos)
+                    if bq > 0: o.append(Order(sym, int(bp),  bq))
+                    if sq > 0: o.append(Order(sym, int(sp), -sq))
+            result[sym] = o
 
-        if ema_dev > VEV_EDGE and vev_pos > -VEV_LIMIT:
-            bid = max(vev_depth.buy_orders) if vev_depth.buy_orders else None
-            if bid is not None:
-                qty = min(VEV_QTY, VEV_LIMIT + vev_pos)
-                if qty > 0:
-                    vev_orders.append(Order('VELVETFRUIT_EXTRACT', bid, -qty))
-
-        elif ema_dev < -VEV_EDGE and vev_pos < VEV_LIMIT:
-            ask = min(vev_depth.sell_orders) if vev_depth.sell_orders else None
-            if ask is not None:
-                qty = min(VEV_QTY, VEV_LIMIT - vev_pos)
-                if qty > 0:
-                    vev_orders.append(Order('VELVETFRUIT_EXTRACT', ask, qty))
-
-        if vev_orders:
-            result['VELVETFRUIT_EXTRACT'] = vev_orders
-
-        # ── 8. Persist state ─────────────────────────────────────────────────
-        trader_data = json.dumps({
-            'ema_vev':   ema_vev,
-            'tte_start': tte_start,
-            'prev_ts':   prev_ts,
-            'day_count': day_count,
-        })
-
-        return result, 0, trader_data
+        return result, 0, json.dumps(td, separators=(",", ":"))
