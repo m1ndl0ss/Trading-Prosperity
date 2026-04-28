@@ -20,6 +20,8 @@ Usage (from Trading-Prosperity repo root):
   # (e.g. .../trading_algos/ROUND2/foo.py -> Data/ROUND2), else defaults to ROUND1.
 
   python backtest_round_pnl.py --trader path/to/trader.py --data Data/TUTORIAL
+
+  python backtest_round_pnl.py --trader trading_algos/ROUND4/foo.py --round ROUND4 --day 1
 """
 
 from __future__ import annotations
@@ -29,9 +31,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-ROOT = Path(__file__).resolve().parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+# This file is misc/scripts/; tape_benchmark and datamodel live in misc/.
+_MISC = Path(__file__).resolve().parent.parent
+_REPO = _MISC.parent
+if str(_MISC) not in sys.path:
+    sys.path.insert(0, str(_MISC))
 
 from tape_benchmark import (
     discover_days,
@@ -84,13 +88,19 @@ def main() -> None:
         default=0.0,
         help="Initial cash for replay (default: 0)",
     )
+    ap.add_argument(
+        "--day",
+        default=None,
+        metavar="N",
+        help="Replay only this day (day_key from prices_*_day_N.csv, e.g. 1). Omit to run all days.",
+    )
     args = ap.parse_args()
 
-    data_root = args.data if args.data is not None else ROOT / "Data"
+    data_root = args.data if args.data is not None else _REPO / "Data"
 
     trader_path = args.trader
     if not trader_path.is_file():
-        alt = ROOT / trader_path
+        alt = _REPO / trader_path
         if alt.is_file():
             trader_path = alt
         else:
@@ -118,6 +128,15 @@ def main() -> None:
 
     trader_cls = load_trader(trader_path.resolve())
     days = discover_days(round_dir)
+    if args.day is not None:
+        day_f = str(args.day).strip()
+        days = [d for d in days if d[0] == day_f]
+        if not days:
+            all_keys = [d[0] for d in discover_days(round_dir)]
+            raise SystemExit(
+                f"No day matching {day_f!r}. Available day keys: {', '.join(all_keys)}"
+            )
+        data_round_hint = f"{data_round_hint} [only day {day_f}]"
     products = discover_products_union(days)
     if not products:
         raise SystemExit(f"No products found under {round_dir}")

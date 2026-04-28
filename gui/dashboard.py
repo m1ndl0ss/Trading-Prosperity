@@ -16,8 +16,10 @@ import sys
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
-_IMC_HOME = _ROOT.parent.parent
-for _p in (_ROOT, _IMC_HOME):
+_MISC = _ROOT / "misc"
+# Workspace root (parent of Trading-Prosperity); optional extra imports
+_IMC_HOME = _ROOT.parent
+for _p in (_ROOT, _MISC, _IMC_HOME):
     if _p.is_dir() and str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 

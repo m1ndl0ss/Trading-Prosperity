@@ -1,0 +1,71 @@
+Mark research -> execution (Round 4, read-only notes)
+Algor: r4_m14_67_tilt_* style (HYDRO: follow 14, oppose 38; VELVET: follow 67, oppose 55).
+
+How to use this file:
+- See iter4_stability/stability_trusted.csv: trusted_* rows -> consider tilts; unstable / candidate_* -> do not add rules without more data.
+- 'unstable' + low_n: do not add new rules; use default MM only.
+- PnL oscillation in backtests = inventory + MTM, not proof that a Mark is random.
+
+--- Snapshot: HYDRO / VELVET flow (iter1) ---
+  d1 Mark 01  VELVET   net=-32 buy_share=0.48 n=157
+  d1 Mark 14  HYDROG   net=-9 buy_share=0.50 n=370
+  d1 Mark 14  VELVET   net=117 buy_share=0.55 n=211
+  d1 Mark 22  HYDROG   net=4 buy_share=0.61 n=5
+  d1 Mark 22  VELVET   net=-213 buy_share=0.18 n=50
+  d1 Mark 38  HYDROG   net=5 buy_share=0.50 n=375
+  d1 Mark 49  VELVET   net=-304 buy_share=0.10 n=40
+  d1 Mark 55  VELVET   net=-87 buy_share=0.48 n=384
+  d1 Mark 67  VELVET   net=519 buy_share=1.00 n=58
+  d2 Mark 01  VELVET   net=-23 buy_share=0.49 n=183
+  d2 Mark 14  HYDROG   net=-70 buy_share=0.47 n=303
+  d2 Mark 14  VELVET   net=-85 buy_share=0.46 n=210
+  d2 Mark 22  HYDROG   net=-2 buy_share=0.47 n=8
+  d2 Mark 22  VELVET   net=-190 buy_share=0.17 n=46
+  d2 Mark 38  HYDROG   net=72 buy_share=0.53 n=311
+  d2 Mark 49  VELVET   net=-360 buy_share=0.09 n=43
+  d2 Mark 55  VELVET   net=91 buy_share=0.52 n=411
+  d2 Mark 67  VELVET   net=567 buy_share=1.00 n=61
+  d3 Mark 01  VELVET   net=97 buy_share=0.56 n=164
+  d3 Mark 14  HYDROG   net=35 buy_share=0.51 n=330
+  d3 Mark 14  VELVET   net=-34 buy_share=0.49 n=226
+  d3 Mark 22  HYDROG   net=8 buy_share=0.67 n=6
+  d3 Mark 22  VELVET   net=-148 buy_share=0.16 n=30
+  d3 Mark 38  HYDROG   net=-43 buy_share=0.48 n=336
+  d3 Mark 49  VELVET   net=-292 buy_share=0.10 n=39
+  d3 Mark 55  VELVET   net=-47 buy_share=0.49 n=403
+  d3 Mark 67  VELVET   net=424 buy_share=1.00 n=46
+
+--- Iter4 verdicts (excerpt) ---
+  trusted_buy_fwd_sign_stable Mark 01  VELVETFRUIT_EXTRACT  buy_mean_ret_100_same_sign_all_days
+  trusted_buy_fwd_sign_stable Mark 01  VEV_5300             buy_mean_ret_100_same_sign_all_days
+  trusted_buy_fwd_sign_stable Mark 01  VEV_5400             buy_mean_ret_100_same_sign_all_days
+  trusted_buy_fwd_sign_stable Mark 01  VEV_5500             buy_mean_ret_100_same_sign_all_days
+  trusted_buy_fwd_sign_stable Mark 14  HYDROGEL_PACK        buy_mean_ret_100_same_sign_all_days
+  trusted_buy_fwd_sign_stable Mark 14  VELVETFRUIT_EXTRACT  buy_mean_ret_100_same_sign_all_days
+  trusted_buy_fwd_sign_stable Mark 14  VEV_5300             buy_mean_ret_100_same_sign_all_days
+  trusted_buy_fwd_sign_stable Mark 14  VEV_5400             buy_mean_ret_100_same_sign_all_days
+  trusted_buy_fwd_sign_stable Mark 22  HYDROGEL_PACK        buy_mean_ret_100_same_sign_all_days
+  trusted_buy_fwd_sign_stable Mark 22  VELVETFRUIT_EXTRACT  buy_mean_ret_100_same_sign_all_days
+  trusted_buy_fwd_sign_stable Mark 49  VELVETFRUIT_EXTRACT  buy_mean_ret_100_same_sign_all_days
+  trusted_buy_fwd_sign_stable Mark 67  VELVETFRUIT_EXTRACT  buy_mean_ret_100_same_sign_all_days
+  trusted_sell_fwd_sign_stable Mark 22  VEV_5300             sell_mean_ret_100_same_sign_all_days
+  trusted_sell_fwd_sign_stable Mark 22  VEV_5400             sell_mean_ret_100_same_sign_all_days
+  trusted_sell_fwd_sign_stable Mark 22  VEV_5500             sell_mean_ret_100_same_sign_all_days
+  unstable             Mark 01  VEV_5200             less_than_2_days
+  unstable             Mark 01  VEV_6000             buy_or_sell_sign_mixed_or_single_day
+  unstable             Mark 01  VEV_6500             buy_or_sell_sign_mixed_or_single_day
+  unstable             Mark 14  VEV_4000             buy_or_sell_sign_mixed_or_single_day
+  unstable             Mark 14  VEV_5200             buy_or_sell_sign_mixed_or_single_day
+  unstable             Mark 22  VEV_5200             buy_or_sell_sign_mixed_or_single_day
+  unstable             Mark 22  VEV_6000             buy_or_sell_sign_mixed_or_single_day
+  unstable             Mark 22  VEV_6500             buy_or_sell_sign_mixed_or_single_day
+  unstable             Mark 38  HYDROGEL_PACK        buy_or_sell_sign_mixed_or_single_day
+  unstable             Mark 38  VEV_4000             buy_or_sell_sign_mixed_or_single_day
+  unstable             Mark 38  VEV_5200             low_n
+  unstable             Mark 38  VEV_5300             low_n
+  unstable             Mark 55  VELVETFRUIT_EXTRACT  buy_or_sell_sign_mixed_or_single_day
+
+--- Suggested parameter discipline ---
+1. Cap |quote_tilt| at 1 tick per layer (as now); do not scale by Mark without replay validation.
+2. If iter3 mean_ret_100 for 'buy' is negative on 2+ days: fading aggressive buys is *consistent*; still check inventory risk.
+3. MMs (balanced buy/sell on iter1) but unstable iter4: use neutral skew; avoid dedicated fade.

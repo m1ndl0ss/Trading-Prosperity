@@ -1,0 +1,33 @@
+HYDROGEL_PACK research (local tape replay)
+=============================================
+
+Data: R3 day_0, R4 day_1, day_2 only. R4 day_3 is NOT used.
+Replay: single-product, passive fill model; not official IMC PnL.
+market_trades: injected from each day's trades CSV so Mark 14/38 sides fire on R4.
+R3 tape has empty buyer/seller -> no Mark tilt (tilt branch never triggers).
+
+Donchian ablation: buy_thresh=9956 sell_thresh=10025 (from R3 day0 mid p10/p90) — JSON.
+
+Per-strategy median PnL across 3 days:
+  donchian_r3: 9,975.000
+  follow_m38: 9,686.000
+  mm_m14: 9,686.000
+  prod_core: 9,686.000
+  thr_mr: 9,686.000
+  naive_mm: 9,077.000
+  tight_mm: 9,000.000
+  wide_mm: 5,614.000
+  unwind_only: 0.000
+
+R4 days only (median):
+  donchian_r3: 10,008.500
+  thr_mr: 9,535.500
+  follow_m38: 8,452.500
+  wide_mm: 8,452.500
+  mm_m14: 8,452.500
+  naive_mm: 8,110.000
+  prod_core: 7,359.000
+  tight_mm: 6,284.000
+  unwind_only: 0.000
+
+R4_day1 vs R4_day2: check hydro_strategy_matrix.csv for rank stability; n=2 is not significant.

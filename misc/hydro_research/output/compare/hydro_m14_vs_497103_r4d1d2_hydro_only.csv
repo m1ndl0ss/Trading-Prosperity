@@ -1,0 +1,7 @@
+day_id,algo,algo_key,n_ticks,pnl,ending_pos,max_drawdown,max_abs_pos,turnover_fills,buy_fills,sell_fills,sharpe_intraday_eq_diff
+R4_day1,r4_m14_67_tilt_minseoks,m14_67_tilt,10000,10132.0,-154,9550.0,175,1350,598,752,0.6800264993414237
+R4_day1,v12_497103_PotentialFriend,v12_497103,10000,13163.0,-32,4024.0,73,1298,633,665,1.8931717430591042
+R4_day2,r4_m14_67_tilt_minseoks,m14_67_tilt,10000,4586.0,-48,4257.0,80,1096,524,572,0.5030958789515726
+R4_day2,v12_497103_PotentialFriend,v12_497103,10000,5519.0,-23,2505.0,48,1137,557,580,1.1193262421341927
+COMBINED_2d_annualized_from_DAILY_pnl,r4_m14_67_tilt_minseoks,m14_67_tilt,0,14718.0,0,0.0,0,0,0,0,29.788882123263
+COMBINED_2d_annualized_from_DAILY_pnl,v12_497103_PotentialFriend,v12_497103,0,18682.0,0,0.0,0,0,0,0,27.433925941801714
